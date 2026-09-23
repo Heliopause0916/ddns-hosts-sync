@@ -25,6 +25,10 @@ type DNSConfig struct {
 	DOHServers []string `yaml:"doh_servers"` // 默认 [cloudflare, dns.google]；依次尝试，全部失败回落系统解析
 	TimeoutSec int      `yaml:"timeout_sec"` // [5,120]，默认 15；单条目全链路超时
 	IPVersion  string   `yaml:"ip_version"`  // "ipv4" | "ipv6" | "both"，默认 ipv4
+	// MaxCNAMEDepth CNAME 链最大深度，仅 resolver.Resolve 使用；DSD §2.1 的
+	// Resolve(source, cfg model.DNSConfig) 签名不含该字段，故由任务端从
+	// GlobalConfig.MaxCNAMEDepth 复制到此（yaml:"-" 不进配置序列化）。
+	MaxCNAMEDepth int `yaml:"-"`
 }
 
 // DefaultGlobalConfig 返回 DSD §1.1 规定的默认全局配置。

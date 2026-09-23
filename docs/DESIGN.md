@@ -266,7 +266,7 @@ func LocateBlock(content []byte) (begin, end int, found bool)
 // MD5Block：对给定字节区间计算 md5（hex）
 func MD5Block(content []byte) (string, error)
 
-// BuildBlock：Lines → 规范化块文本（不含 markers，见 5.4 规范规则）
+// BuildBlock：Lines → 规范化块文本（不含 markers，见 5.3 规范规则）
 func BuildBlock(lines []Line, order model.IPOrder) ([]byte, error)
 
 // ComposeFull：content + 期望块 → 新全文（缺块则追加文末；有块则替换区间）
@@ -327,7 +327,7 @@ func AtomicWriteFile(path string, data []byte) error
 
 func ReadJSON[T any](path string) (T, bool, error) // bool=false 表示文件不存在
 
-// 状态：唯一写者=任务；梯形直接轮询读，容忍 rename 窗口内瞬时失败（抽干一次 50ms 重试）
+// 状态：唯一写者=任务；GUI 直接轮询读，容忍 rename 窗口内瞬时失败（抽干一次 50ms 重试）
 func WriteStatus(path string, s *model.SyncStatus) error
 func ReadStatus(path string) (*model.SyncStatus, bool, error)
 
