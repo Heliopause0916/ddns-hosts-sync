@@ -1,0 +1,36 @@
+# 构建产物
+/dist/
+/bin/
+*.exe
+*.dll
+*.so
+*.dylib
+*.msi
+*.dmg
+
+# Go 编译与测试缓存
+*.test
+*.out
+coverage.*
+/build/
+/ddns-hosts-sync
+
+# 开发临时文件
+*.tmp
+*.swp
+*~
+
+# IDE/编辑器
+.idea/
+.vscode/
+*.iml
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# 本地运行残留（运行时数据不入库，开发调试日志默认忽略）
+*.log
+
+# goreleaser 产物（dist/ 已覆盖，release 相关输出一并忽略）
+/release/
