@@ -176,12 +176,23 @@ func queryLevel(ctx context.Context, servers []string, name string, qtypes []str
 			ch <- levelResult{ips: i, cname: c, err: e}
 		}(qt)
 	}
-	r1, r2 := <-ch, <-ch
-	results := []levelResult{r1, r2}
-	// NXDOMAIN 任一命中即短路（不回退、不等待另一通道）。
-	for _, r := range results {
-		if errors.Is(r.err, ErrNXDomain) {
-			return nil, "", r.err
+	// NXDOMAIN 优先级短路：任一通道命中即返回，**不等待另一通道完成**
+	// （两通道是对同一 name 的并行查询，任一条 NXDOMAIN 即表名不存在，
+	// 无需等慢通道——否则挂起的 A 通道会把 NXDOMAIN 拖到超时）。
+	results := make([]levelResult, 0, len(qtypes))
+	for len(results) < len(qtypes) {
+		select {
+		case r := <-ch:
+			if errors.Is(r.err, ErrNXDomain) {
+				return nil, "", r.err
+			}
+			results = append(results, r)
+		case <-ctx.Done():
+			// 全链路截止收束：剩余槽位补通道失败，防同时就绪时丢失已得数据；
+			// 已到手的 ips/cname 照常参与下方合并。
+			for len(results) < len(qtypes) {
+				results = append(results, levelResult{err: fmt.Errorf("doh 全链路截止: %w", context.DeadlineExceeded)})
+			}
 		}
 	}
 	var errs []error
@@ -268,6 +279,8 @@ func queryDOH(ctx context.Context, server, name, qtype string, deadline time.Tim
 	if resp.StatusCode != http.StatusOK {
 		return nil, "", 0, fmt.Errorf("doh %s query %s %s: http %d", server, name, qtype, resp.StatusCode)
 	}
+	// 响应体大小上限 1MB：防御恶意/异常超长应答打爆内存。
+	resp.Body = http.MaxBytesReader(nil, resp.Body, maxDoHBodyBytes)
 	var ans dohAnswer
 	if derr := json.NewDecoder(resp.Body).Decode(&ans); derr != nil {
 		return nil, "", 0, fmt.Errorf("doh %s query %s %s: 解码失败: %w", server, name, qtype, derr)
@@ -367,6 +380,7 @@ const (
 	maxCNAMEDepthDefault = 10 // DSD §1.1 默认值
 	timeoutSecDefault    = 15 // DSD §1.1 默认值
 	perAttemptTimeout    = 3 * time.Second
+	maxDoHBodyBytes      = 1 << 20 // DoH 应答体大小上限 1MB
 )
 
 // attemptTimeout 单次 HTTP 尝试超时：约 3s，受全链路截止时间（timeout_sec）封顶。

@@ -258,3 +258,77 @@ func TestResolveSystemBadChannel(t *testing.T) {
 		t.Errorf("不应为无关哨兵错误: %v", err)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// M2a 补充测试
+// ---------------------------------------------------------------------------
+
+// TestResolveCrossServerFallback server A 返回 HTTP 404 → 应尝试 server B 并
+// 成功，而非将整个通道判为 timeout。
+func TestResolveCrossServerFallback(t *testing.T) {
+	good, _ := mockServer(t, static(map[string]mockAnswer{
+		"a.example.com": {a: []string{"203.0.113.10"}},
+	}))
+	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "not found", http.StatusNotFound) // 404：通道错误
+	}))
+	t.Cleanup(bad.Close)
+	cfg := dohCfg(good.URL)
+	cfg.DOHServers = []string{bad.URL, good.URL} // 坏 server 在前
+	res, err := Resolve("a.example.com", cfg)
+	if err != nil {
+		t.Fatalf("server A 404 后应落到 server B 成功，实际 %v", err)
+	}
+	if len(res.IPs) != 1 || res.IPs[0] != "203.0.113.10" {
+		t.Errorf("解析结果不符: %v", res.IPs)
+	}
+	if res.UsedFallback {
+		t.Error("server B DoH 命中不应标记系统回退")
+	}
+}
+
+// TestResolveMalformedJSONNotFatal 畸形 JSON 应答不致命：重试与换通道后以
+// 通道失败收束（不 panic、不误报无关哨兵）。
+func TestResolveMalformedJSONNotFatal(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, "{{{ 不是 JSON ")
+	}))
+	t.Cleanup(srv.Close)
+	cfg := dohCfg(srv.URL)
+	cfg.TimeoutSec = 5
+	_, err := Resolve("a.example.com", cfg)
+	if err == nil {
+		t.Fatal("畸形 JSON 双通道重试后应失败")
+	}
+	if errors.Is(err, ErrInvalidName) || errors.Is(err, ErrCNAMELoop) || errors.Is(err, ErrTooDeep) {
+		t.Fatalf("不应误报无关哨兵: %v", err)
+	}
+}
+
+// TestResolveBothModeNXDomainNotWaitingForHang both 模式下 NXDOMAIN 应非阻塞
+// 短路：A 通道立即 NXDOMAIN，AAAA 通道挂起，解析整体立即返回 ErrNXDomain，
+// 不等待慢通道拖到超时（M2a S-3）。
+func TestResolveBothModeNXDomainNotWaitingForHang(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Query().Get("type") {
+		case "A":
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"Status":3,"Answer":[]}`) // 立即 NXDOMAIN
+		default: // AAAA
+			<-r.Context().Done() // 挂起直至客户端超时
+		}
+	}))
+	t.Cleanup(srv.Close)
+	cfg := dohCfg(srv.URL)
+	cfg.IPVersion = "both"
+	cfg.TimeoutSec = 1 // 限制挂起通道清理时间
+	start := time.Now()
+	_, err := Resolve("gone.example.com", cfg)
+	if !errors.Is(err, ErrNXDomain) {
+		t.Fatalf("期望 ErrNXDomain，实际 %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Errorf("NXDOMAIN 应非阻塞短路，实际等待 %v（等到了挂起的 AAAA 通道）", elapsed)
+	}
+}

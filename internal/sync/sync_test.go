@@ -552,3 +552,126 @@ func TestRun_ClockSkewAheadGates(t *testing.T) {
 		t.Errorf("时间回拨（last_run_at 在未来）应视为未到点等待: %s", got.SyncWindow)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// M2a 补充测试
+// ---------------------------------------------------------------------------
+
+// TestRun_EnabledFalseSkipsDistribution（I-1）enabled=false 全局停用：
+// 不触发任何解析与 hosts 写盘，仅写 waiting 最小 status（刷新 updated_at）。
+func TestRun_EnabledFalseSkipsDistribution(t *testing.T) {
+	e := setupEnv(t)
+	e.writeConfig(t, []model.Entry{e1})
+	f := &fakeResolver{bySource: map[string][]string{"ok-a.example.com": {"192.0.2.10"}}}
+	e.attach(f)
+
+	cfg := config.Default()
+	cfg.Entries = []model.Entry{e1}
+	cfg.Enabled = false
+	cfg.FlushDNS = false
+	cfg.DNS.Mode = "system"
+	if err := cfg.Save(e.cfgPath); err != nil {
+		t.Fatalf("写停用配置失败: %v", err)
+	}
+	st, err := sync.Run(e.opts)
+	if err != nil {
+		t.Fatalf("Run 失败: %v", err)
+	}
+	if f.calls != 0 {
+		t.Errorf("enabled=false 不应触发任何解析，实际 %d 次", f.calls)
+	}
+	if st.SyncWindow != model.WindowWaiting {
+		t.Errorf("停用窗口应为 waiting: %s", st.SyncWindow)
+	}
+	if _, serr := os.Stat(e.hostsPath); !os.IsNotExist(serr) {
+		t.Error("enabled=false 不得创建/触碰 hosts")
+	}
+	got := e.readStatus(t)
+	if got.SyncWindow != model.WindowWaiting || got.UpdatedAt.IsZero() {
+		t.Errorf("应落盘 waiting 最小 status 且刷新 updated_at: %+v", got)
+	}
+}
+
+// TestRun_DeletedEntryRemovedFromHosts（I-2）删除 config 条目后重跑：
+// 该 target 旧行随替换清走；保留条目不受影响。
+func TestRun_DeletedEntryRemovedFromHosts(t *testing.T) {
+	e := setupEnv(t)
+	e.writeConfig(t, []model.Entry{e1, e2})
+	f := &fakeResolver{bySource: map[string][]string{
+		"ok-a.example.com": {"192.0.2.10"},
+		"ok-b.example.com": {"203.0.113.77"},
+	}}
+	e.attach(f)
+	if _, err := sync.Run(e.opts); err != nil {
+		t.Fatalf("首轮 Run 失败: %v", err)
+	}
+	if content := string(e.hostsContent(t)); !strings.Contains(content, "203.0.113.77\ttgt-b.example.com") {
+		t.Fatalf("前置：两条目均应写入:\n%s", content)
+	}
+
+	// 删除 e2 → 重跑 → b 行消失，a 行保留。
+	e.writeConfig(t, []model.Entry{e1})
+	if _, err := sync.Run(e.opts); err != nil {
+		t.Fatalf("删除后 Run 失败: %v", err)
+	}
+	content := string(e.hostsContent(t))
+	if strings.Contains(content, "tgt-b.example.com") {
+		t.Errorf("已删除条目（target 不在 config）旧行应被清理:\n%s", content)
+	}
+	if !strings.Contains(content, "192.0.2.10\ttgt-a.example.com") {
+		t.Errorf("保留条目行不应受影响:\n%s", content)
+	}
+}
+
+// TestRun_EmptyEntriesEmptyHostsFirstRun 空 entries + 空 hosts 首次运行：
+// 创建仅含两条 marker 的空块（present=true 可检测），无异常。
+func TestRun_EmptyEntriesEmptyHostsFirstRun(t *testing.T) {
+	e := setupEnv(t)
+	e.writeConfig(t, nil) // 空条目
+	st, err := sync.Run(e.opts)
+	if err != nil {
+		t.Fatalf("Run 失败: %v", err)
+	}
+	if st.SyncWindow != model.WindowSynced || !st.Task.LastRunOK {
+		t.Errorf("全同步应成功: %+v", st.Task)
+	}
+	content := e.hostsContent(t)
+	if !strings.Contains(string(content), hostsfile.BeginMarker) || !strings.Contains(string(content), hostsfile.EndMarker) {
+		t.Fatalf("空配置也应落两个 marker:\n%s", content)
+	}
+	if lines := hostsfile.ParseBlock(content); len(lines) != 0 {
+		t.Errorf("空块应无内层行: %+v", lines)
+	}
+	if !st.HostsBlock.Present {
+		t.Error("空块仍应 present=true")
+	}
+}
+
+// TestRun_UppercaseEditedTargetSingleLine（S-8 e2e）手改大写 target 后重跑：
+// 归一为 config 小写值，不出现大小写双行，块上一版为大写时自动自愈重写。
+func TestRun_UppercaseEditedTargetSingleLine(t *testing.T) {
+	e := setupEnv(t)
+	e.writeConfig(t, []model.Entry{e1})
+	f := &fakeResolver{bySource: map[string][]string{"ok-a.example.com": {"192.0.2.10"}}}
+	e.attach(f)
+	if _, err := sync.Run(e.opts); err != nil {
+		t.Fatalf("首轮 Run 失败: %v", err)
+	}
+	tampered := strings.Replace(string(e.hostsContent(t)), "tgt-a.example.com", "TGT-A.EXAMPLE.COM", 1)
+	if err := os.WriteFile(e.hostsPath, []byte(tampered), 0o644); err != nil {
+		t.Fatalf("大写篡改失败: %v", err)
+	}
+	if _, err := sync.Run(e.opts); err != nil {
+		t.Fatalf("归一轮 Run 失败: %v", err)
+	}
+	content := string(e.hostsContent(t))
+	if strings.Contains(content, "TGT-A.EXAMPLE.COM") {
+		t.Errorf("大写 target 应被归一替换:\n%s", content)
+	}
+	if n := strings.Count(content, "192.0.2.10\t"); n != 1 {
+		t.Errorf("同一 target 不应出现双行（实际 %d 行）:\n%s", n, content)
+	}
+	if n := strings.Count(content, "\tTGT-A"); n != 0 {
+		t.Errorf("不应残留大写行:\n%s", content)
+	}
+}

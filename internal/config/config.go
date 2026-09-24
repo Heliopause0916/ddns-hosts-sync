@@ -356,5 +356,17 @@ func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
 		_ = os.Remove(tmp)
 		return err
 	}
+	syncDir(filepath.Dir(path)) // rename 后父目录 fsync（POSIX 持久性）
 	return nil
+}
+
+// syncDir 对目录做 fsync 保证 rename 产生的目录项变更落盘（POSIX 持久性）。
+// Windows 无法 open 目录，忽略该步（尽力而为，错误不上报）。
+func syncDir(dir string) {
+	d, err := os.Open(dir)
+	if err != nil {
+		return
+	}
+	_ = d.Sync()
+	_ = d.Close()
 }

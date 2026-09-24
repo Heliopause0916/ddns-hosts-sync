@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/heliopause/ddns-hosts-sync/internal/model"
@@ -209,7 +210,19 @@ func WriteAtomic(path string, full []byte, eol string) error {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("%w: rename: %v", ErrWriteFailed, err)
 	}
+	syncDir(dir) // rename 后父目录 fsync（POSIX 持久性）
 	return nil
+}
+
+// syncDir 对目录做 fsync 保证 rename 产生的目录项变更落盘（POSIX 持久性）。
+// Windows 无法 open 目录，忽略该步（尽力而为，错误不上报）。
+func syncDir(dir string) {
+	d, err := os.Open(dir)
+	if err != nil {
+		return
+	}
+	_ = d.Sync()
+	_ = d.Close()
 }
 
 // Backup 将 path 当前内容复制为 `<basename>.bak-ddns-hosts-sync`（同目录，
@@ -244,8 +257,10 @@ func DetectEOL(content []byte) string {
 }
 
 // ParseBlock 解析 content 中标记块内的记录行（不含 markers），按 §5.3 正则
-// ^(\S+)\s+(\S+)$ 解析；不可解析的行被跳过。块缺失返回空切片
-// （found=false 由 LocateBlock 另行判定）。
+// ^(\S+)\s+(\S+)$ 解析；不可解析的行被跳过。IP 回到规范形态、Target 小写
+// 归一（§5.3"Target 小写"）——手改大写 target 的块行与 config 小写值归一为
+// 同一键，装配侧不会出现大小写双行。块缺失返回空切片（found=false 由
+// LocateBlock 另行判定）。
 func ParseBlock(content []byte) []Line {
 	begin, end, found := LocateBlock(content)
 	if !found {
@@ -274,7 +289,7 @@ func ParseBlock(content []byte) []Line {
 			if m := linePattern.FindSubmatch(line); m != nil {
 				ip, target := string(m[1]), string(m[2])
 				if net.ParseIP(ip) != nil {
-					out = append(out, Line{IP: normalizeIP(ip), Target: target})
+					out = append(out, Line{IP: normalizeIP(ip), Target: strings.ToLower(strings.TrimSpace(target))})
 				}
 			}
 		}

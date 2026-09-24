@@ -1,9 +1,11 @@
 package state
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -304,5 +306,141 @@ func TestCleanupStaleTmp(t *testing.T) {
 func TestCleanupStaleTmpMissingDir(t *testing.T) {
 	if _, err := CleanupStaleTmp(filepath.Join(t.TempDir(), "no-such-dir"), time.Hour); err == nil {
 		t.Error("目录不存在应返回错误")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// M2a 补充测试
+// ---------------------------------------------------------------------------
+
+// TestAtomicWriteConcurrentReaders 写者循环原子覆盖 + 读者并发轮询：
+// 断言读者永远读到完整可解析 JSON（rename 窗口永不半截）。
+func TestAtomicWriteConcurrentReaders(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "status.json")
+	blob := make([]byte, 64<<10) // 64KB 载荷放大 rename 窗口
+
+	type payload struct {
+		Seq  int    `json:"seq"`
+		Blob []byte `json:"blob"`
+	}
+	if err := AtomicWriteJSON(path, payload{Seq: 0, Blob: blob}); err != nil {
+		t.Fatalf("初始写入: %v", err)
+	}
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { // 写者
+		defer wg.Done()
+		for i := 1; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			if err := AtomicWriteJSON(path, payload{Seq: i, Blob: blob}); err != nil {
+				t.Errorf("写者失败: %v", err)
+				return
+			}
+		}
+	}()
+	go func() { // 读者
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			got, ok, err := ReadJSON[payload](path)
+			if err != nil {
+				t.Errorf("rename 窗口读到半截/非法 JSON: %v", err)
+				return
+			} else if !ok {
+				continue
+			}
+			if got.Seq < 0 {
+				t.Errorf("非法 seq: %d", got.Seq)
+				return
+			}
+			if len(got.Blob) != len(blob) {
+				t.Errorf("载荷半截: %d != %d", len(got.Blob), len(blob))
+				return
+			}
+		}
+	}()
+	time.Sleep(200 * time.Millisecond)
+	close(stop)
+	wg.Wait()
+}
+
+// TestConsumeTriggerCorruptConsumed 损坏 JSON 的 trigger 同样被消费（删除），
+// 避免每周期重复告警。
+func TestConsumeTriggerCorruptConsumed(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "trigger.json")
+	if err := os.WriteFile(path, []byte("{: 不是 JSON"), 0o644); err != nil {
+		t.Fatalf("写损坏 trigger: %v", err)
+	}
+	_, consumed, err := ConsumeTrigger(path)
+	if err == nil {
+		t.Error("损坏 trigger 应报解析错误")
+	}
+	if consumed {
+		t.Error("损坏内容不算有效消费（consumed=false）")
+	}
+	if _, serr := os.Stat(path); !os.IsNotExist(serr) {
+		t.Error("损坏 trigger 应被直接删除，避免每周期重复告警")
+	}
+}
+
+// TestConsumeTriggerInvalidRequestID 非法 request_id（不可用作文件名）不拼入
+// 归档名，直接删除。
+func TestConsumeTriggerInvalidRequestID(t *testing.T) {
+	for _, id := range []string{"../evil", "a/b", "a b", "x.y", "", "a..b"} {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "trigger.json")
+		tr := &model.Trigger{Version: 1, RequestID: id, RequestedAt: time.Now().UTC(), Action: model.ActionSyncNow}
+		if err := WriteTrigger(path, tr); err != nil {
+			t.Fatalf("WriteTrigger(%q): %v", id, err)
+		}
+		_, consumed, err := ConsumeTrigger(path)
+		if err == nil || !strings.Contains(err.Error(), "request_id 非法") {
+			t.Fatalf("%q 应报 request_id 非法，实际 %v", id, err)
+		}
+		if consumed {
+			t.Errorf("%q 非法 id 不应有效消费", id)
+		}
+		if _, serr := os.Stat(path); !os.IsNotExist(serr) {
+			t.Errorf("%q 文件应被删除", id)
+		}
+	}
+}
+
+// TestConsumeTriggerArchiveRemoveFailure 归档删除失败：rename 已发生 → 已消费
+// + 非 nil error（归档文件残留，不会二次消费）。
+func TestConsumeTriggerArchiveRemoveFailure(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "trigger.json")
+	tr := &model.Trigger{Version: 1, RequestID: "req-ok", RequestedAt: time.Now().UTC(), Action: model.ActionSyncNow}
+	if err := WriteTrigger(path, tr); err != nil {
+		t.Fatalf("WriteTrigger: %v", err)
+	}
+	old := removeEntry
+	removeEntry = func(string) error { return errors.New("注入的删除失败") }
+	defer func() { removeEntry = old }()
+
+	got, consumed, err := ConsumeTrigger(path)
+	if err == nil || !strings.Contains(err.Error(), "注入的删除失败") {
+		t.Fatalf("应上报删除失败，实际 %v", err)
+	}
+	if !consumed || got == nil || got.RequestID != "req-ok" {
+		t.Fatalf("rename 已发生应视为已消费: consumed=%v got=%+v", consumed, got)
+	}
+	if _, serr := os.Stat(path); !os.IsNotExist(serr) {
+		t.Error("原 trigger 应已被 rename（不会二次消费）")
+	}
+	if _, serr := os.Stat(filepath.Join(dir, "trigger.consumed.req-ok.json")); serr != nil {
+		t.Error("删除失败时归档文件应残留")
 	}
 }

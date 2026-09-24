@@ -45,8 +45,49 @@ type Options struct {
 // triggerMaxAge 触发新鲜度阈值（DSD §1.3：≤2 分钟视为有效）。
 const triggerMaxAge = 2 * time.Minute
 
+// 单实例锁参数（DSD §3.4）：冲突等待上限 5s（拿不到 exit 0）；锁文件 mtime
+// 超过 10 分钟视为陈旧（进程必然已死，O_EXCL 死锁自愈语义），删除后重试。
+// 包变量便于内部单测缩短等待。
+var (
+	lockWait       = 5 * time.Second
+	lockStaleAfter = 10 * time.Minute
+)
+
+// acquireSyncLock 以 O_CREATE|O_EXCL 获取 state/sync.lock（DSD §3.4）。
+//   - 成功：返回 release 函数（关闭句柄 + 删除锁文件），contended=false；
+//   - 冲突：等待 wait 时长，期间若锁变陈旧（mtime > staleAfter）删除重试；
+//     等待期满仍拿不到 → contended=true（调用方记日志并 exit 0，不写 status）；
+//   - 非 EEXIST 的创建错误（目录只读等）→ 返回非 nil error（致命）。
+func acquireSyncLock(path string, wait, staleAfter time.Duration) (release func(), contended bool, err error) {
+	deadline := time.Now().Add(wait)
+	for {
+		f, oerr := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+		if oerr == nil {
+			return func() {
+				_ = f.Close()
+				_ = os.Remove(path)
+			}, false, nil
+		}
+		if !errors.Is(oerr, os.ErrExist) {
+			return nil, false, fmt.Errorf("sync.lock 创建失败: %w", oerr)
+		}
+		if info, serr := os.Stat(path); serr == nil && time.Since(info.ModTime()) > staleAfter {
+			if rerr := os.Remove(path); rerr == nil {
+				continue // 陈旧锁已清除，下一轮重试创建
+			}
+		}
+		if time.Now().After(deadline) {
+			// contended：调用方不得调用 release；返回 no-op 防止误用 panic。
+			return func() {}, true, nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
 // Run 执行一次完整循环（sync 子命令入口）。返回最终落盘 status 快照；
 // 非 nil error 表示程序自身致命错误（状态目录不可用等），调用方应退出非零。
+// 特例：单实例锁冲突等待期满返回 (nil, nil)（DSD §3.4：不写 status，调用方
+// 按 exit 0 退出）。
 func Run(opts Options) (final *model.SyncStatus, err error) {
 	now := time.Now().UTC()
 
@@ -69,6 +110,26 @@ func Run(opts Options) (final *model.SyncStatus, err error) {
 			_ = lg.Close()
 		}
 	}()
+
+	// ── 2b. 单实例护栏：state/sync.lock（O_EXCL）。拿不到锁等 lockWait 后
+	// 记日志并 return（nil, nil）→ 调用方 exit 0；陈旧锁（进程必然已死）
+	// 删除重试自愈。──
+	release, contended, lerr := acquireSyncLock(filepath.Join(opts.StateDir, "sync.lock"), lockWait, lockStaleAfter)
+	if lerr != nil {
+		return nil, lerr
+	}
+	defer release()
+	if contended {
+		lg.Info("", "sync.lock 被占用：另一实例运行中，等待"+lockWait.String()+"后放弃（exit 0）")
+		return nil, nil
+	}
+
+	// ── 2c. 崩溃残留自愈（DSD §5.1）：清理 state 目录 mtime>1h 的 *.tmp。──
+	if removed, cerr := state.CleanupStaleTmp(opts.StateDir, time.Hour); cerr != nil {
+		lg.Warn("", "清理崩溃残留 tmp 失败: "+cerr.Error())
+	} else if removed > 0 {
+		lg.Info("", fmt.Sprintf("清理崩溃残留 tmp %d 个", removed))
+	}
 
 	// ── 3. 读 config：失败 → DefaultGlobalConfig 兜底 + last_error；成功 → Normalize。──
 	var lastErrMsg string
@@ -103,16 +164,24 @@ func Run(opts Options) (final *model.SyncStatus, err error) {
 	// 时间回拨：now.Before(lastRunAt+interval) 对负 elapsed 天然视同未到点。
 	prev, _, _ := state.ReadStatus(statusPath) // 读失败视同无历史 → 本轮完整同步自愈
 	if !force && prev != nil && now.Before(prev.Task.LastRunAt.Add(interval)) {
-		st := *prev // 浅拷贝：保留上次任务/条目/块状态，仅刷新窗口字段
-		st.UpdatedAt = now
-		st.NextScheduledAt = now.Add(interval)
-		st.SyncWindow = model.WindowWaiting
-		st.IntervalMinutes = cfg.IntervalMinutes
-		if werr := state.WriteStatus(statusPath, &st); werr != nil {
+		st := minimalWaitingStatus(prev, now, interval, cfg.IntervalMinutes)
+		if werr := state.WriteStatus(statusPath, st); werr != nil {
 			return nil, fmt.Errorf("写 status.json 失败: %w", werr)
 		}
 		lg.Info("", "interval gate：未到同步间隔，等待窗口")
-		return &st, nil
+		return st, nil
+	}
+
+	// ── 5b. 全局停用开关（DSD §1.1）：GUI"暂停自动同步"写 enabled=false，
+	// 任务端读 false 即跳过分发——写最小 status（刷新 updated_at 保证托盘
+	// 新鲜度）后返回，不触碰解析与 hosts。force/trigger 一律不越过该开关。──
+	if !cfg.Enabled {
+		st := minimalWaitingStatus(prev, now, interval, cfg.IntervalMinutes)
+		if werr := state.WriteStatus(statusPath, st); werr != nil {
+			return nil, fmt.Errorf("写 status.json 失败: %w", werr)
+		}
+		lg.Info("", "config.enabled=false：全局停用，本轮跳过分发")
+		return st, nil
 	}
 
 	// ── 6. 完整同步。──
@@ -201,11 +270,18 @@ func Run(opts Options) (final *model.SyncStatus, err error) {
 		statuses = append(statuses, es)
 	}
 
-	// 6b. 装配期望块：OK 条目新行覆盖 + 未被覆盖的既有行原样继承
-	// （失败/停用/无效条目旧值保留，DSD §3.1/§3.3 failure_keep_old）。
+	// 6b. 装配期望块：OK 条目新行覆盖；未被覆盖的既有行仅当 target 仍存在于
+	// config entries 中才继承（失败/停用/无效条目旧值保留，DSD §3.1/§3.3）；
+	// 已从 config 删除/改 target 的旧行不再进入期望块（随替换自然清走，§4.2）。
+	configTargets := make(map[string]bool, len(entries))
+	for i := range entries {
+		configTargets[strings.ToLower(strings.TrimSpace(entries[i].Target))] = true
+	}
 	merged := map[string][]hostsfile.Line{}
 	for t, lns := range curByTarget {
-		merged[t] = lns
+		if configTargets[t] {
+			merged[t] = lns
+		}
 	}
 	for t, lns := range resolvedByTarget {
 		if len(lns) > 0 {
@@ -261,12 +337,8 @@ func Run(opts Options) (final *model.SyncStatus, err error) {
 	changed := !blockPresent || curMD5 != expectedMD5
 	lastWriteOK := true
 	lastWriteAt := time.Time{}
-	if changed && blockPresent && curMD5 != expectedMD5 {
-		// 块缺失/篡改自愈（DSD §3.2）。
-		msg := "检测到块缺失/篡改，已自动重写"
-		lg.Warn("", msg)
-		lastErrMsg = joinMsg(lastErrMsg, msg)
-	}
+	// 块缺失/篡改自愈标注（DSD §3.2）：写盘成功后才记录 warn 与 last_error。
+	tamperDetected := changed && blockPresent && curMD5 != expectedMD5
 	if changed {
 		// 6e. 备份（失败仅 warn）→ ComposeFull → WriteAtomic（重试 3 次 500ms）。
 		if _, berr := hostsfile.Backup(opts.HostsPath); berr != nil {
@@ -295,6 +367,11 @@ func Run(opts Options) (final *model.SyncStatus, err error) {
 			lastWriteAt = time.Now().UTC()
 			blockPresent = true
 			curMD5 = expectedMD5
+			if tamperDetected {
+				msg := "检测到块缺失/篡改，已自动重写"
+				lg.Warn("", msg)
+				lastErrMsg = joinMsg(lastErrMsg, msg)
+			}
 			if cfg.FlushDNS {
 				if ferr := flushDNSCache(); ferr != nil {
 					msg := "warn: flushdns 失败: " + ferr.Error()
@@ -350,6 +427,24 @@ func Run(opts Options) (final *model.SyncStatus, err error) {
 // ---------------------------------------------------------------------------
 // 助手
 // ---------------------------------------------------------------------------
+
+// minimalWaitingStatus 构造 waiting 最小 status：保留上轮任务/条目/块状态
+// （浅拷贝），仅刷新 updated_at（保证托盘新鲜度）、next_scheduled_at
+// （now+interval 重算）、sync_window 与 interval_minutes。无历史时构造全新
+// 空 status（仅版本字段）。
+func minimalWaitingStatus(prev *model.SyncStatus, now time.Time, interval time.Duration, intervalMinutes int) *model.SyncStatus {
+	var st model.SyncStatus
+	if prev != nil {
+		st = *prev
+	} else {
+		st = model.SyncStatus{Version: model.StatusVersion}
+	}
+	st.UpdatedAt = now
+	st.NextScheduledAt = now.Add(interval)
+	st.SyncWindow = model.WindowWaiting
+	st.IntervalMinutes = intervalMinutes
+	return &st
+}
 
 // resolveFn 解析入口：优先测试钩子，否则 resolver.Resolve。
 func resolveFn(opts Options, source string, dnsCfg model.DNSConfig) (*resolver.ResolveResult, error) {

@@ -323,3 +323,89 @@ func TestHexMD5Reference(t *testing.T) {
 		t.Error("hexMD5 参考值不符")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// M2a 补充测试
+// ---------------------------------------------------------------------------
+
+// TestComposeFullMixedEOL 混合 EOL：首行 CRLF + 后续行 LF。EOL 检测取首个
+// 换行（CRLF）→ 块内行全部 CRLF；块外各行字节原样保留。
+func TestComposeFullMixedEOL(t *testing.T) {
+	content := []byte("10.0.0.1\tgw\r\n127.0.0.1\tlocalhost\n8.8.8.8\tresolver\r\n")
+	full, _, err := ComposeFull(content, block(t, []Line{{"203.0.113.42", "t.example.com"}, {"2001:db8::1", "t6.example.com"}}))
+	if err != nil {
+		t.Fatalf("ComposeFull 失败: %v", err)
+	}
+	if !bytes.Contains(full, []byte(BeginMarker+"\r\n")) ||
+		!bytes.Contains(full, []byte("203.0.113.42\tt.example.com\r\n")) ||
+		!bytes.Contains(full, []byte("2001:db8::1\tt6.example.com\r\n")) ||
+		!bytes.Contains(full, []byte(EndMarker+"\r\n")) {
+		t.Errorf("首换行为 CRLF 时块内应全部 CRLF:\n%q", full)
+	}
+	for _, keep := range [][]byte{
+		[]byte("10.0.0.1\tgw\r\n"),
+		[]byte("127.0.0.1\tlocalhost\n"), // LF 行原样保留
+		[]byte("8.8.8.8\tresolver\r\n"),
+	} {
+		if !bytes.Contains(full, keep) {
+			t.Errorf("块外字节被改写: %q", keep)
+		}
+	}
+}
+
+// TestComposeFullBlockAtEOFWithoutNewline 存量文件"块紧贴文末且无尾换行"：
+// 再次组装应规范化重写（补尾换行），块外（块前）内容逐字节保留；且一次
+// 规范化后可幂等（无尾换行的半截块不会每轮触发伪写盘）。
+func TestComposeFullBlockAtEOFWithoutNewline(t *testing.T) {
+	head := []byte("10.0.0.1\tgw\n")
+	inner := block(t, []Line{{"203.0.113.42", "t.example.com"}})
+	region := BlockText(inner, "\n")
+	region = bytes.TrimSuffix(region, []byte("\n")) // 去掉 EndMarker 行尾换行
+	content := append(append([]byte{}, head...), region...)
+
+	full, changed, err := ComposeFull(content, inner)
+	if err != nil {
+		t.Fatalf("ComposeFull 失败: %v", err)
+	}
+	if !changed {
+		t.Error("缺尾换行的块应被规范化重写（changed=true）")
+	}
+	if !bytes.HasPrefix(full, head) {
+		t.Errorf("块前内容必须原样保留:\n%q", full)
+	}
+	if !bytes.HasSuffix(full, []byte(EndMarker+"\n")) {
+		t.Errorf("规范化块应带 EndMarker 尾换行:\n%q", full)
+	}
+	// 幂等：规范化结果再次组装不再变化。
+	full2, changed2, err := ComposeFull(full, inner)
+	if err != nil {
+		t.Fatalf("ComposeFull 二次失败: %v", err)
+	}
+	if changed2 {
+		t.Error("规范化后应幂等（不触发伪写盘）")
+	}
+	if !bytes.Equal(full, full2) {
+		t.Error("幂等性破坏")
+	}
+}
+
+// TestParseBlockNormalizesTarget 手改大写 target 的块行被小写归一（§5.3），
+// 装配侧不会因大小写不同键而出现双行。
+func TestParseBlockNormalizesTarget(t *testing.T) {
+	inner := block(t, []Line{{"192.0.2.1", "tgt.example.com"}})
+	upInner := bytes.Replace(inner, []byte("tgt.example.com"), []byte("TGT.EXAMPLE.COM"), 1)
+	full, _, err := ComposeFull([]byte("10.0.0.1\tgw\n"), upInner)
+	if err != nil {
+		t.Fatalf("ComposeFull 失败: %v", err)
+	}
+	lines := ParseBlock(full)
+	if len(lines) != 1 {
+		t.Fatalf("应解析出 1 行，实际 %+v", lines)
+	}
+	if lines[0].Target != "tgt.example.com" {
+		t.Errorf("target 应小写归一: %q", lines[0].Target)
+	}
+	if lines[0].IP != "192.0.2.1" {
+		t.Errorf("IP 保持: %q", lines[0].IP)
+	}
+}
