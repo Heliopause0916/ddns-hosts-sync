@@ -1,0 +1,56 @@
+name: test
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Go（版本取自 go.mod）
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: 安装图形依赖（fyne 测试所需）
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xorg-dev libgl1-mesa-dev
+
+      - name: go test -race ./...
+        run: go test -race ./...
+
+      - name: go vet ./...
+        run: go vet ./...
+
+      - name: gofmt 格式检查
+        shell: bash
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "以下文件未通过 gofmt 检查："
+            printf '%s\n' "$unformatted"
+          fi
+          test -z "$unformatted"
+
+      - name: Windows 交叉编译检查（非 fyne 包）
+        run: |
+          # internal/gui、internal/tray 与 cmd/ddns-hosts-sync 依赖 fyne.io/systray
+          # （纯 cgo 实现），Linux 下 GOOS=windows 无 mingw 交叉链无法编译；
+          # 因此仅对以下纯 Go 包做交叉编译门禁，Windows 原生产物由 build-windows 产出。
+          GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build \
+            ./internal/config \
+            ./internal/hostsfile \
+            ./internal/logging \
+            ./internal/model \
+            ./internal/platform \
+            ./internal/resolver \
+            ./internal/state \
+            ./internal/sync \
+            ./internal/tasks

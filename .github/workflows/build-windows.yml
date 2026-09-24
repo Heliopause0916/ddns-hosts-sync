@@ -1,0 +1,75 @@
+name: build-windows
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    name: build-windows
+    runs-on: windows-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Go（版本取自 go.mod）
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: 确保 gcc 可用（fyne/glfw cgo 需要）
+        shell: pwsh
+        run: |
+          if (Get-Command gcc -ErrorAction SilentlyContinue) {
+            Write-Host "gcc 已可用："
+            gcc --version | Select-Object -First 1
+          } else {
+            Write-Host "未检测到 gcc，通过 choco 安装 mingw ..."
+            choco install mingw -y --no-progress
+            $mingwBin = "C:\ProgramData\chocolatey\lib\mingw\tools\install\mingw64\bin"
+            if (Test-Path $mingwBin) { $env:Path = "$mingwBin;$env:Path" }
+            if (-not (Get-Command gcc -ErrorAction SilentlyContinue)) {
+              throw "gcc 安装后仍不可用，请检查 choco mingw 安装结果或路径"
+            }
+            Write-Host "gcc 安装完成："
+            gcc --version | Select-Object -First 1
+          }
+
+      - name: 构建 Windows 可执行文件
+        run: go build -trimpath -ldflags "-s -w" -o dist\ddns-hosts-sync.exe .\cmd\ddns-hosts-sync
+
+      - name: 打包 zip（exe + 简明说明）
+        shell: pwsh
+        run: |
+          $readme = @(
+            "ddns-hosts-sync —— 通用 CNAME→hosts 同步工具（Windows CI 构建产物）",
+            "",
+            "【说明】",
+            "- 本 exe 由 GitHub Actions 的 build-windows 工作流自动构建，非正式发布包。",
+            "- 仅包含本仓库工作流产生的最新构建，建议与源码版本 tag 核对。",
+            "",
+            "【子命令】",
+            "- tray       托盘 UI：常驻托盘、配置窗口、立即同步（登录自启）",
+            "- sync       后台同步（配合计划任务按间隔执行）",
+            "- install    安装：目录/ACL + 默认配置 + 计划任务 + 托盘自启 + 首轮同步",
+            "- uninstall  卸载：注销任务/自启 + hosts 还原 + 数据目录清理",
+            "- version    打印版本",
+            "",
+            "【冒烟步骤】（管理员 PowerShell）",
+            "1. .\ddns-hosts-sync.exe version",
+            "2. .\ddns-hosts-sync.exe install",
+            "3. .\ddns-hosts-sync.exe sync",
+            "4. .\ddns-hosts-sync.exe tray"
+          )
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Set-Content -Path dist\README.txt -Value $readme -Encoding UTF8
+          Compress-Archive -LiteralPath dist\ddns-hosts-sync.exe, dist\README.txt `
+            -DestinationPath dist\ddns-hosts-sync-windows-amd64.zip -Force
+          Get-ChildItem dist | Select-Object Name, Length
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: ddns-hosts-sync-windows-amd64
+          path: dist/ddns-hosts-sync-windows-amd64.zip
+          retention-days: 14
