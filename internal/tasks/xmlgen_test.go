@@ -156,3 +156,37 @@ func TestBuildTaskXML_ArgsEmpty(t *testing.T) {
 		t.Errorf("空 Args 时 Arguments 应为空，实际 %q", got.Actions.Exec[0].Arguments)
 	}
 }
+
+// taskSchemaNamespace Task Scheduler schema 命名空间：schtasks 报错
+// "(2,3):Task:" 的根因即 MSXML 要求根元素 <Task> 属于该命名空间（冒烟 Bug 1），
+// 缺少时根元素 schema 校验失败、install/Register 直接报错。
+const taskSchemaNamespace = "http://schemas.microsoft.com/windows/2004/02/mit/task"
+
+// TestBuildTaskXML_TaskNamespace 根元素必须携带 Task Scheduler schema 命名空间：
+//
+//  1. Marshal 原始输出包含带 xmlns 声明与 version="1.2" 的根元素首行；
+//  2. 输出可反序列化回带 Space 的 xml.Name（"space local" 形式）且 Space
+//     与命名空间一致。
+func TestBuildTaskXML_TaskNamespace(t *testing.T) {
+	doc, err := BuildTaskXML(TaskSpec{
+		Name:     "ddns-hosts-sync",
+		ExecPath: `C:\Program Files\ddns-hosts-sync\ddns-hosts-sync.exe`,
+		Args:     []string{"sync"},
+	})
+	if err != nil {
+		t.Fatalf("BuildTaskXML: %v", err)
+	}
+	root := `<Task xmlns="` + taskSchemaNamespace + `" version="1.2">`
+	if text := string(doc); !strings.Contains(text, root) {
+		t.Errorf("根元素应输出 %q:\n%s", root, text)
+	}
+	var got struct {
+		XMLName xml.Name `xml:"http://schemas.microsoft.com/windows/2004/02/mit/task Task"`
+	}
+	if err := xml.Unmarshal(doc, &got); err != nil {
+		t.Fatalf("反序列化生成的 XML 失败: %v\n%s", err, doc)
+	}
+	if got.XMLName.Space != taskSchemaNamespace {
+		t.Errorf("反序列化后 XMLName.Space 应为 %q，实际 %q", taskSchemaNamespace, got.XMLName.Space)
+	}
+}

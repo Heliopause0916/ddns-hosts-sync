@@ -7,6 +7,8 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
+
+	"github.com/heliopause/ddns-hosts-sync/internal/console"
 )
 
 // windowsPlatform Windows 平台实现（DSD §2.6 + ARCHITECTURE §5.1）。
@@ -64,11 +66,11 @@ func (p *windowsPlatform) SetupAllDirs() error {
 }
 
 // runIcacls 执行一次 icacls <dir> <args...>；args 逐段传参（B1），
-// 失败返回带输出的错误上下文。
+// 失败返回带输出的错误上下文（输出按系统 ANSI 代码页解码，GBK 中文不乱码）。
 func runIcacls(dir string, args ...string) error {
 	out, err := exec.Command("icacls", append([]string{dir}, args...)...).CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("platform: icacls %s 失败: %v（输出: %s）", dir, err, out)
+		return fmt.Errorf("platform: icacls %s 失败: %v（输出: %s）", dir, err, console.DecodeAnsi(out))
 	}
 	return nil
 }
@@ -81,7 +83,7 @@ func (p *windowsPlatform) InstallTrayAutostart() error {
 	out, err := exec.Command("reg", "add", runKey,
 		"/v", TaskName, "/t", "REG_SZ", "/d", value, "/f").CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("platform: reg add HKCU Run 失败: %v（输出: %s）", err, out)
+		return fmt.Errorf("platform: reg add HKCU Run 失败: %v（输出: %s）", err, console.DecodeAnsi(out))
 	}
 	return nil
 }

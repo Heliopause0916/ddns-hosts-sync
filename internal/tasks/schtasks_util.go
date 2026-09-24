@@ -4,6 +4,8 @@ import (
 	"os/exec"
 	"strings"
 	"unicode/utf16"
+
+	"github.com/heliopause/ddns-hosts-sync/internal/console"
 )
 
 // ---------------------------------------------------------------------------
@@ -34,6 +36,9 @@ var schtasksNotFoundMarkers = []string{
 // isTaskNotFound 从 schtasks 退出码/输出识别"任务不存在"（Uninstall/Exists
 // 幂等语义依赖）：退出码 1 或 2（schtasks /Query 缺失任务返回 1、
 // ERROR_FILE_NOT_FOUND）即判不存在；另按输出报文标记兜底多语言系统。
+// 输出先经 console.DecodeAnsi 解码为 UTF-8 再匹配——GBK 环境 schtasks 输出
+// 是 GBK 字节，原始字节上"找不到"等标记永不命中，只能靠退出码兜底，
+// 解码后中文标记即可正确命中（冒烟 Bug 2；退出码兜底逻辑保留不动）。
 func isTaskNotFound(out []byte, err error) bool {
 	if ee, ok := err.(*exec.ExitError); ok {
 		switch ee.ExitCode() {
@@ -41,7 +46,7 @@ func isTaskNotFound(out []byte, err error) bool {
 			return true
 		}
 	}
-	low := strings.ToLower(string(out))
+	low := strings.ToLower(console.DecodeAnsi(out))
 	for _, marker := range schtasksNotFoundMarkers {
 		if strings.Contains(low, marker) {
 			return true

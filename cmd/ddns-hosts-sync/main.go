@@ -9,6 +9,8 @@ package main
 import (
 	"fmt"
 	"os"
+
+	"github.com/heliopause/ddns-hosts-sync/internal/console"
 )
 
 // version 由 ldflags 注入：go build -ldflags "-X main.version=v0.1.0+<sha>"
@@ -16,6 +18,10 @@ import (
 var version = "dev"
 
 func main() {
+	// 启动最先适配终端编码（GBK 等非 UTF-8 控制台按 UTF-8 渲染程序自身
+	// 输出；非 Windows/非 tty 恒为 no-op，跨平台安全），随后才解析输出。
+	console.WrapStdio()
+
 	if len(os.Args) < 2 {
 		usage()
 		os.Exit(1)

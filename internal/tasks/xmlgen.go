@@ -72,8 +72,11 @@ type xActions struct {
 }
 
 // xTask 顶层 <Task version="1.2">，字段顺序即 XML 输出顺序（DSD §5.2）。
+// XMLName 必须携带 Task Scheduler schema 命名空间（"space local" 形式）：
+// MSXML 在根元素处做 schema 校验，缺少 xmlns 时 schtasks 报
+// "(2,3):Task:"（冒烟 Bug 1；同一命名空间由子元素继承，无需逐元素标注）。
 type xTask struct {
-	XMLName          xml.Name          `xml:"Task"`
+	XMLName          xml.Name          `xml:"http://schemas.microsoft.com/windows/2004/02/mit/task Task"`
 	Version          string            `xml:"version,attr"`
 	RegistrationInfo xRegistrationInfo `xml:"RegistrationInfo"`
 	Triggers         xTriggers         `xml:"Triggers"`

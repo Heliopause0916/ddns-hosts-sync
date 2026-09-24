@@ -7,6 +7,8 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+
+	"github.com/heliopause/ddns-hosts-sync/internal/console"
 )
 
 // windowsManager schtasks 命令封装（ARCHITECTURE §5.1、DSD §5.2）。
@@ -55,7 +57,9 @@ func (m windowsManager) Install(spec TaskSpec) error {
 	out, err := exec.Command("schtasks", "/Create", "/TN", spec.Name,
 		"/XML", tmpPath, "/F").CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("schtasks /Create 失败: %v（输出: %s）", err, strings.TrimSpace(string(out)))
+		// 输出按系统 ANSI 代码页解码为 UTF-8（GBK 环境 schtasks 中文报错不
+		// 再乱码；UTF-8 直通，冒烟 Bug 2）。
+		return fmt.Errorf("schtasks /Create 失败: %v（输出: %s）", err, strings.TrimSpace(console.DecodeAnsi(out)))
 	}
 	return nil
 }
@@ -65,7 +69,7 @@ func (m windowsManager) Uninstall(name string) error {
 	out, err := exec.Command("schtasks", "/Delete", "/TN", name, "/F").CombinedOutput()
 	if err != nil {
 		if !isTaskNotFound(out, err) {
-			return fmt.Errorf("schtasks /Delete 失败: %v（输出: %s）", err, strings.TrimSpace(string(out)))
+			return fmt.Errorf("schtasks /Delete 失败: %v（输出: %s）", err, strings.TrimSpace(console.DecodeAnsi(out)))
 		}
 	}
 	return nil
@@ -75,7 +79,7 @@ func (m windowsManager) Uninstall(name string) error {
 func (m windowsManager) Trigger(name string) error {
 	out, err := exec.Command("schtasks", "/Run", "/TN", name).CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("schtasks /Run 失败: %v（输出: %s）", err, strings.TrimSpace(string(out)))
+		return fmt.Errorf("schtasks /Run 失败: %v（输出: %s）", err, strings.TrimSpace(console.DecodeAnsi(out)))
 	}
 	return nil
 }
@@ -89,5 +93,5 @@ func (m windowsManager) Exists(name string) (bool, error) {
 	if isTaskNotFound(out, err) {
 		return false, nil
 	}
-	return false, fmt.Errorf("schtasks /Query 失败: %v（输出: %s）", err, strings.TrimSpace(string(out)))
+	return false, fmt.Errorf("schtasks /Query 失败: %v（输出: %s）", err, strings.TrimSpace(console.DecodeAnsi(out)))
 }
