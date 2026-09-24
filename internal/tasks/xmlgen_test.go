@@ -21,7 +21,6 @@ type tTask struct {
 			StartBoundary string `xml:"StartBoundary"`
 			Repetition    struct {
 				Interval          string `xml:"Interval"`
-				Duration          string `xml:"Duration"`
 				StopAtDurationEnd string `xml:"StopAtDurationEnd"`
 			} `xml:"Repetition"`
 			Enabled string `xml:"Enabled"`
@@ -61,7 +60,7 @@ func mustTaskXML(t *testing.T, execPath string, args ...string) tTask {
 }
 
 // TestBuildTaskXML_FullStructure DSD §5.2 全结构断言：Task version=1.2、
-// BootTrigger+TimeTrigger（StartBoundary/PT1M/PT0S/StopAtDurationEnd=false）、
+// BootTrigger+TimeTrigger（StartBoundary/PT1M/StopAtDurationEnd=false）、
 // SID S-1-5-18、RunLevel HighestAvailable、Settings 三项、Exec 独立字段。
 func TestBuildTaskXML_FullStructure(t *testing.T) {
 	execPath := `C:\Program Files\ddns-hosts-sync\ddns-hosts-sync.exe`
@@ -85,9 +84,6 @@ func TestBuildTaskXML_FullStructure(t *testing.T) {
 	}
 	if tt.Repetition.Interval != "PT1M" {
 		t.Errorf("Repetition Interval 应为 PT1M，实际 %q", tt.Repetition.Interval)
-	}
-	if tt.Repetition.Duration != "PT0S" {
-		t.Errorf("Repetition Duration 应为 PT0S（无限重复），实际 %q", tt.Repetition.Duration)
 	}
 	if tt.Repetition.StopAtDurationEnd != "false" {
 		t.Errorf("StopAtDurationEnd 应为 false，实际 %q", tt.Repetition.StopAtDurationEnd)
@@ -188,5 +184,28 @@ func TestBuildTaskXML_TaskNamespace(t *testing.T) {
 	}
 	if got.XMLName.Space != taskSchemaNamespace {
 		t.Errorf("反序列化后 XMLName.Space 应为 %q，实际 %q", taskSchemaNamespace, got.XMLName.Space)
+	}
+}
+
+// TestBuildTaskXML_RepetitionOmitDuration Repetition 必须省略 <Duration>：
+// schtasks/MSXML 真机校验对 <Duration>PT0S</Duration>（零时长）拒收报
+// "(14,26):Duration:PT0S"；schema 中 duration 可选（minOccurs=0），省略即
+// 无限重复，语义与 PT0S 等价。断言输出 XML 不含该元素、也不含 PT0S 常量；
+// Repetition 其余字段（Interval/StopAtDurationEnd）仍在（FullStructure 覆盖）。
+func TestBuildTaskXML_RepetitionOmitDuration(t *testing.T) {
+	doc, err := BuildTaskXML(TaskSpec{
+		Name:     "ddns-hosts-sync",
+		ExecPath: `C:\Program Files\ddns-hosts-sync\ddns-hosts-sync.exe`,
+		Args:     []string{"sync"},
+	})
+	if err != nil {
+		t.Fatalf("BuildTaskXML: %v", err)
+	}
+	text := string(doc)
+	if strings.Contains(text, "<Duration>") {
+		t.Errorf("输出 XML 不得含 <Duration> 元素（PT0S 被 schtasks 拒收，省略即无限重复）:\n%s", text)
+	}
+	if strings.Contains(text, "PT0S") {
+		t.Errorf("输出 XML 不得含 PT0S 常量:\n%s", text)
 	}
 }

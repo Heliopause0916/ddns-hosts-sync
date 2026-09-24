@@ -21,15 +21,20 @@ type xBootTrigger struct {
 	Enabled string `xml:"Enabled"`
 }
 
-// xRepetition <Repetition>：PT1M 重复、PT0S 无限期、StopAtDurationEnd=false。
+// xRepetition <Repetition>：PT1M 重复间隔、StopAtDurationEnd=false。
+//
+// 注意：本结构刻意不输出 <Duration>——Task Scheduler schema 中 duration 为
+// 可选（minOccurs=0），省略即无限重复；此前硬编码 <Duration>PT0S</Duration>
+// 虽语义相等，但 schtasks/MSXML 真机校验对零时长拒收（"(14,26):Duration:
+// PT0S"），故不发送该元素。StopAtDurationEnd 为 schema 中独立可选字段，
+// 保留输出合法。
 type xRepetition struct {
 	Interval          string `xml:"Interval"`
-	Duration          string `xml:"Duration"`
 	StopAtDurationEnd string `xml:"StopAtDurationEnd"`
 }
 
 // xTimeTrigger 时间触发器：StartBoundary 固定 2026-01-01T00:00:00（DSD §5.2），
-// 每分钟重复由 Repetition 承担，NeverStop 语义由 PT0S 实现。
+// 分钟级重复由 Repetition 承担，无限重复（NeverStop）语义由 Duration 省略实现。
 type xTimeTrigger struct {
 	StartBoundary string      `xml:"StartBoundary"`
 	Repetition    xRepetition `xml:"Repetition"`
@@ -86,7 +91,7 @@ type xTask struct {
 }
 
 // BuildTaskXML 由 spec 生成 schtasks 注册用的 <Task> XML 文档（UTF-8 字节，
-// 无 XML 声明；BootTrigger+TimeTrigger、SYSTEM SID、PT1M/PT0S 等结构常量
+// 无 XML 声明；BootTrigger+TimeTrigger、SYSTEM SID、PT1M 重复间隔等结构常量
 // 按 DSD §5.2 冻结）。生成失败返回 error（编码/xml 序列化异常，理论不可达）。
 func BuildTaskXML(spec TaskSpec) ([]byte, error) {
 	doc := xTask{
@@ -100,7 +105,6 @@ func BuildTaskXML(spec TaskSpec) ([]byte, error) {
 				StartBoundary: "2026-01-01T00:00:00",
 				Repetition: xRepetition{
 					Interval:          "PT1M",
-					Duration:          "PT0S",
 					StopAtDurationEnd: "false",
 				},
 				Enabled: "true",
