@@ -13,7 +13,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -40,6 +39,10 @@ type Options struct {
 	// Resolve 为 test-only 注入钩子：nil 时使用 resolver.Resolve。
 	// 单测借此控制解析结果，实现"变化→写盘、无变化→不写盘、失败→保留"三路断言。
 	Resolve func(source string, cfg model.DNSConfig) (*resolver.ResolveResult, error)
+	// FlushDNS 系统 DNS 缓存刷新（M2b-1 起由 platform 注入，三平台实现：
+	// Windows ipconfig /flushdns、macOS dscacheutil、Linux resolvectl）。
+	// nil 时跳过（测试/未接入场景）；调用方保证与 cfg.FlushDNS 联判。
+	FlushDNS func() error
 }
 
 // triggerMaxAge 触发新鲜度阈值（DSD §1.3：≤2 分钟视为有效）。
@@ -372,8 +375,8 @@ func Run(opts Options) (final *model.SyncStatus, err error) {
 				lg.Warn("", msg)
 				lastErrMsg = joinMsg(lastErrMsg, msg)
 			}
-			if cfg.FlushDNS {
-				if ferr := flushDNSCache(); ferr != nil {
+			if cfg.FlushDNS && opts.FlushDNS != nil {
+				if ferr := opts.FlushDNS(); ferr != nil {
 					msg := "warn: flushdns 失败: " + ferr.Error()
 					lg.Warn("", msg)
 					lastErrMsg = joinMsg(lastErrMsg, msg)
@@ -513,26 +516,7 @@ func writeWithRetry(path string, full []byte, eol string) error {
 	return lastErr
 }
 
-// flushDNSCache Linux best-effort DNS 缓存刷新：尝试 resolvectl flush-caches
-// 或 systemd-resolve --flush-caches，全部失败才报错（调用方仅 warn）。
-// TODO M2: 移入 platform 包按 OS 分发（Windows ipconfig /flushdns、
-// macOS dscacheutil -flushcache）。
-func flushDNSCache() error {
-	cmds := [][]string{
-		{"resolvectl", "flush-caches"},
-		{"systemd-resolve", "--flush-caches"},
-	}
-	for _, c := range cmds {
-		if _, err := exec.LookPath(c[0]); err != nil {
-			continue
-		}
-		if err := exec.Command(c[0], c[1:]...).Run(); err == nil {
-			return nil
-		}
-	}
-	return errors.New("resolvectl/systemd-resolve 均不可用或执行失败")
-}
-
+// hostsBlockState 组装 hosts_block 状态字段（DSD §1.6）。
 func hostsBlockState(present bool, contentMD5, expectedMD5 string, lastWriteAt time.Time, lastWriteOK bool) model.HostsBlockStatus {
 	return model.HostsBlockStatus{
 		Present:     present,

@@ -182,6 +182,20 @@ func ComposeFull(content []byte, block []byte) (full []byte, changed bool, err e
 	return full, !bytes.Equal(full, content), nil
 }
 
+// RemoveBlock 删除全文中整个标记块（含两条 marker，uninstall 还原 hosts 用，
+// ARCHITECTURE §4.3）。块缺失返回 (content 原样, false, nil)；块外字节原样
+// 保留——若删除后全文为空或仅剩空行，调用方可按空文件处理。
+func RemoveBlock(content []byte) (rest []byte, changed bool) {
+	begin, end, found := LocateBlock(content)
+	if !found {
+		return content, false
+	}
+	rest = make([]byte, 0, len(content)-(end-begin))
+	rest = append(rest, content[:begin]...)
+	rest = append(rest, content[end:]...)
+	return rest, true
+}
+
 // WriteAtomic 原子写：同目录 temp（O_EXCL）→ fsync → rename 覆盖。
 // eol 参数为 DSD 签名保留（全文已含目标 EOL，写盘不做任何转换）。
 // 失败时清理临时文件并以 ErrWriteFailed 包装。

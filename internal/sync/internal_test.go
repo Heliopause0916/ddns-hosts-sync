@@ -21,14 +21,9 @@ func fakeResolve(source string, _ model.DNSConfig) (*resolver.ResolveResult, err
 	}, nil
 }
 
-// TestFlushDNSCacheFailureIsReportedButNonFatal flushDNSCache 兜底败路径：
-// PATH 中无 resolvectl/systemd-resolve → 返回错误（调用方仅 warn，不阻断写盘）。
-func TestFlushDNSCacheFailureIsReportedButNonFatal(t *testing.T) {
-	t.Setenv("PATH", t.TempDir()) // 空 PATH，任何命令都 LookPath 失败
-	if err := flushDNSCache(); err == nil {
-		t.Error("无可用缓存刷新命令应返回错误")
-	}
-}
+// TestFlushDNSCacheFailureIsReportedButNonFatal 已迁移至 internal/platform
+// （TestFlushDNSCacheErrorsWhenUnavailable，语义保留）：sync 侧 flushdns 职责
+// 自 M2b-1 起由 platform 注入（Options.FlushDNS），本包不再持有 OS 实现。
 
 // ---------------------------------------------------------------------------
 // I-3 sync.lock 单实例护栏

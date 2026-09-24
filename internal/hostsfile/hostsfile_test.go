@@ -409,3 +409,56 @@ func TestParseBlockNormalizesTarget(t *testing.T) {
 		t.Errorf("IP 保持: %q", lines[0].IP)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// RemoveBlock（M2b-1：uninstall 还原 hosts）
+// ---------------------------------------------------------------------------
+
+// TestRemoveBlockMidFile 块居文件中：删除区间后块外字节逐一保留。
+func TestRemoveBlockMidFile(t *testing.T) {
+	inner := block(t, []Line{{"192.0.2.1", "tgt.example.com"}})
+	full, _, err := ComposeFull([]byte("127.0.0.1\tlocalhost\n"), inner)
+	if err != nil {
+		t.Fatalf("ComposeFull 失败: %v", err)
+	}
+	// 在块后追加一段块外内容，验证仅删块、块外全部保留。
+	full = append(full, []byte("10.0.0.1\tgw\n")...)
+	rest, changed := RemoveBlock(full)
+	if !changed {
+		t.Fatal("有块时应报告变化")
+	}
+	if string(rest) != "127.0.0.1\tlocalhost\n10.0.0.1\tgw\n" {
+		t.Errorf("删除块后块外内容应原样保留:\n%q", rest)
+	}
+	if _, _, found := LocateBlock(rest); found {
+		t.Error("删除后不应残留标记块")
+	}
+}
+
+// TestRemoveBlockNoBlock 无块：content 原样返回、changed=false（幂等）。
+func TestRemoveBlockNoBlock(t *testing.T) {
+	content := []byte("127.0.0.1\tlocalhost\n")
+	rest, changed := RemoveBlock(content)
+	if changed {
+		t.Error("无块不应报告变化")
+	}
+	if !bytes.Equal(rest, content) {
+		t.Error("无块时应原样返回")
+	}
+}
+
+// TestRemoveBlockOnlyBlock 全文只有块：删除后为空。
+func TestRemoveBlockOnlyBlock(t *testing.T) {
+	inner := block(t, []Line{{"192.0.2.1", "tgt.example.com"}})
+	full, _, err := ComposeFull(nil, inner)
+	if err != nil {
+		t.Fatalf("ComposeFull 失败: %v", err)
+	}
+	rest, changed := RemoveBlock(full)
+	if !changed {
+		t.Fatal("仅有块时应报告变化")
+	}
+	if len(rest) != 0 {
+		t.Errorf("仅含块的全文删除后应为空:\n%q", rest)
+	}
+}
