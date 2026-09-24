@@ -54,8 +54,7 @@ func (p *darwinPlatform) FlushDNSCache() error {
 // 覆盖写入（同组可写目录 + staff 组成员默认），故 0644 不阻断 GUI 保存。
 // 非 root 安装（调试场景）跳过 chown，仅保留 775。
 func (p *darwinPlatform) SetupAllDirs() error {
-	dirs := []string{p.paths.dataDir, filepath.Join(p.paths.dataDir, "config"),
-		p.paths.state, filepath.Join(p.paths.dataDir, "logs")}
+	dirs := dataDirTree(p.paths.dataDir, p.paths.state)
 	for _, d := range dirs {
 		if err := os.MkdirAll(d, 0o775); err != nil {
 			return fmt.Errorf("platform: 创建目录 %s 失败: %w", d, err)

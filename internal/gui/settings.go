@@ -141,9 +141,11 @@ func (g *GUI) setPauseCheck(on bool) {
 }
 
 // collectGlobalSettings 收集并校验表单值（返回标准化结果或错误列表）。
+// M6 修复：暂停勾选态随表单读取（此前硬编码 nc.Enabled=true，批量保存会把
+// 暂停中的 enabled 重置为 true，违背 DSD §1.1"暂停自动同步"语义）。
 func (g *GUI) collectGlobalSettings() (model.GlobalConfig, []string) {
 	nc := model.DefaultGlobalConfig()
-	nc.Enabled = true // 暂停态由 gPause 即时写维护，批量保存不覆盖暂停状态
+	nc.Enabled = !g.gPause.Checked // 暂停勾选即 enabled=false（读取表单，不覆盖暂停态）
 	var errs []string
 
 	iv, err := strconv.Atoi(strings.TrimSpace(g.gInterval.Text))

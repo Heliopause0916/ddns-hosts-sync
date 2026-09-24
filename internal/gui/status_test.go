@@ -172,3 +172,54 @@ func TestIndexStatus(t *testing.T) {
 		t.Fatal("不应含未知 id")
 	}
 }
+
+// TestGUIStatusBarSeparateFromPanel（M7 回归）底部状态栏与状态 Tab 使用独立
+// label 实例：refreshStatusPanel 后底部"最近/下次"不再恒为 "--"，且面板字段
+// 与状态栏互不覆盖。
+func TestGUIStatusBarSeparateFromPanel(t *testing.T) {
+	g, _ := newTestGUI(t)
+	if g.stLabels[barSyncTime] == g.stLabels[stSyncTime] {
+		t.Fatal("底部状态栏与状态 Tab 的最近同步应各自独立实例（map key 拆分）")
+	}
+	if g.stLabels[barNextTime] == g.stLabels[stNextTime] {
+		t.Fatal("底部状态栏与状态 Tab 的下次同步应各自独立实例")
+	}
+
+	now := time.Now().UTC()
+	st := &model.SyncStatus{
+		Version:         model.StatusVersion,
+		UpdatedAt:       now,
+		NextScheduledAt: now.Add(5 * time.Minute),
+		IntervalMinutes: 5,
+		SyncWindow:      model.WindowSynced,
+		Task:            model.TaskStatus{LastRunOK: true},
+		Entries:         []model.EntryStatus{{ID: "e-01", Status: model.EntryOK}},
+		HostsBlock:      model.HostsBlockStatus{Present: true, ContentMD5: "a", ExpectedMD5: "a", LastWriteOK: true},
+	}
+	g.mu.Lock()
+	g.st = st
+	g.statusMap = indexStatus(st)
+	g.mu.Unlock()
+	g.refreshStatusPanel()
+
+	wantBar := "最近同步: " + timeFmt(now)
+	if got := g.stLabels[barSyncTime].Text; got != wantBar {
+		t.Fatalf("底部最近同步 = %q, want %q（M7 修复前恒为 --）", got, wantBar)
+	}
+	wantNext := "下次同步: " + timeFmt(now.Add(5*time.Minute))
+	if got := g.stLabels[barNextTime].Text; got != wantNext {
+		t.Fatalf("底部下次同步 = %q, want %q", got, wantNext)
+	}
+	if got := g.stLabels[stWindow].Text; !strings.Contains(got, "已同步") {
+		t.Fatalf("状态 Tab 本轮窗口 = %q，应含已同步", got)
+	}
+
+	// st==nil 时状态栏复位为 "--"。
+	g.mu.Lock()
+	g.st = nil
+	g.mu.Unlock()
+	g.refreshStatusPanel()
+	if got := g.stLabels[barSyncTime].Text; got != "最近同步: --" {
+		t.Fatalf("st=nil 时底部最近同步应复位 --，得 %q", got)
+	}
+}

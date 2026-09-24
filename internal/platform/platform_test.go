@@ -31,6 +31,10 @@ func TestResolveWindowsPaths(t *testing.T) {
 	if p.log != `C:\ProgramData\ddns-hosts-sync\logs\sync.log` {
 		t.Errorf("日志路径不符: %q", p.log)
 	}
+	// B2：trigger 随 config 同目录（config\ 已 Users M 可写）。
+	if p.trigger != `C:\ProgramData\ddns-hosts-sync\config\trigger.json` {
+		t.Errorf("trigger 路径不符（应落 config\\ 下）: %q", p.trigger)
+	}
 }
 
 // TestResolveWindowsPathsFallback 环境缺失（%SystemRoot% 已省略）→ 回落
@@ -100,6 +104,9 @@ func TestRebaseWithDataDir(t *testing.T) {
 	if p.ConfigPath() != "/tmp/ddns-test/config/config.yaml" {
 		t.Errorf("ConfigPath 应随 DataDir 重算: %q", p.ConfigPath())
 	}
+	if p.TriggerPath() != "/tmp/ddns-test/config/trigger.json" {
+		t.Errorf("TriggerPath 应随 DataDir 重算并落 config\\: %q", p.TriggerPath())
+	}
 	if p.StateDir() != "/tmp/ddns-test/state" {
 		t.Errorf("StateDir 应随 DataDir 重算: %q", p.StateDir())
 	}
@@ -118,5 +125,32 @@ func TestFlushDNSCacheErrorsWhenUnavailable(t *testing.T) {
 	t.Setenv("PATH", t.TempDir()) // 空 PATH，任何命令 LookPath 失败
 	if err := New().FlushDNSCache(); err == nil {
 		t.Error("无可用缓存刷新命令应返回错误")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 安装目录树 / 自启 Exec（S14/S15 共用纯函数）
+// ---------------------------------------------------------------------------
+
+// TestDataDirTree S14 目录形状：dataDir 本身 + config/state/logs 子目录。
+func TestDataDirTree(t *testing.T) {
+	got := dataDirTree("/srv/ddns", "/srv/ddns/state")
+	want := []string{"/srv/ddns", "/srv/ddns/config", "/srv/ddns/state", "/srv/ddns/logs"}
+	if len(got) != len(want) {
+		t.Fatalf("目录数 = %d, want %d: %v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("目录[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+// TestDesktopExecLine S15：Exec 路径加引号（含空格路径不被截断）。
+func TestDesktopExecLine(t *testing.T) {
+	got := desktopExecLine("/opt/my app/ddns-hosts-sync")
+	want := "Exec=\"/opt/my app/ddns-hosts-sync\" tray"
+	if got != want {
+		t.Errorf("desktopExecLine = %q, want %q", got, want)
 	}
 }

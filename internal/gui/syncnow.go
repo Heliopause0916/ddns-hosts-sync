@@ -15,6 +15,11 @@ import (
 const (
 	syncCooldown   = 10 * time.Second // 按钮防连点
 	syncNoResponse = 3 * time.Minute  // 无响应判超时
+	// syncFeedbackInterval 无响应评估的独立间隔（S9）：不依赖 status.json
+	// 文件变化——任务死亡时 pollOnce 因 mtime 未变早退（changed=false），
+	// 若把超时评估挂在轮询内则红横幅永不触发；此定时器按最近已知
+	// updated_at 独立评估，保证"≤3 分钟无响应"恒定生效。
+	syncFeedbackInterval = 30 * time.Second
 )
 
 // onSyncNow 立即同步（DSD §4.5 步骤 1-4）：
@@ -103,6 +108,19 @@ func syncFeedbackState(stUpdatedAt, base, reqAt, now time.Time) (done bool, msg 
 		return true, "后台任务未响应（计划任务可能未安装）", bannerErr
 	}
 	return false, "", 0
+}
+
+// checkSyncFeedback 由独立定时器定时触发（S9）：即便 status.json 不再变化
+// （后台任务死亡/计划任务未安装），仍按最近已知 updated_at 评估"立即同步"
+// 是否超时——命中则红横幅并清除 pending，不复用轮询的 changed 门。
+func (g *GUI) checkSyncFeedback() {
+	g.mu.Lock()
+	var updatedAt time.Time
+	if g.st != nil {
+		updatedAt = g.st.UpdatedAt
+	}
+	g.mu.Unlock()
+	g.updateSyncFeedback(updatedAt)
 }
 
 // newTriggerID 立即同步 request_id（满足 state 消费归档命名 [A-Za-z0-9-]）。

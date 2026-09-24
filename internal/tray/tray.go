@@ -1,6 +1,7 @@
 package tray
 
 import (
+	"log"
 	"os"
 	"path/filepath"
 	"sync"
@@ -20,7 +21,7 @@ type Deps struct {
 	LockPath    string // 单实例锁文件路径（建议位于 Users 可写目录，如 config 同级）
 	ConfigPath  string // config.yaml 路径（托盘"暂停同步"直读写）
 	StatusPath  string // state/status.json 路径（托盘读）
-	TriggerPath string // state/trigger.json 路径（托盘"立即同步"写）
+	TriggerPath string // config/trigger.json 路径（B2：config\ 已 Users M 可写；托盘"立即同步"写）
 
 	OpenConfig  func() // 打开配置窗口（协调者负责 fyne.Do 入主循环 + 单实例窗口）
 	OpenLogsDir func() // 打开日志目录（资源管理器定位）
@@ -81,6 +82,15 @@ func New(deps Deps) *Tray {
 // Run 启动托盘（阻塞直至退出）。返回 ErrAlreadyRunning 时调用方提示"程序已在
 // 运行"并正常退出（DSD §3.4）。
 func (t *Tray) Run() error {
+	// M5：托盘可能先于 install 启动（config/ 目录尚未建立），而单实例锁位于
+	// config 同级目录。先防御性创建锁所在目录：失败仅记日志并继续——未安装时
+	// 按 DSD §3.4 灰色预期运行，不应因锁目录缺失而退出（锁获取/状态刷新
+	// 各自按缺失态降级）。
+	if dir := filepath.Dir(t.deps.LockPath); dir != "" && dir != "." && dir != string(filepath.Separator) {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			log.Printf("tray: 创建锁目录 %s 失败（继续运行）: %v", dir, err)
+		}
+	}
 	lock, err := AcquireInstanceLock(t.deps.LockPath, InstanceLockStaleAge)
 	if err != nil {
 		return err
@@ -92,7 +102,8 @@ func (t *Tray) Run() error {
 	return nil
 }
 
-// onReady 系统托盘就绪：置灰图标与启动文案 → 构建菜单 → 启动事件循环。
+// onReady 系统托盘就绪：置灰图标与启动文案 → 读取暂停态 → 构建菜单 →
+// 启动事件循环。
 func (t *Tray) onReady() {
 	icon, err := trayIcon(ColorGray)
 	if err == nil {
@@ -100,6 +111,11 @@ func (t *Tray) onReady() {
 	}
 	t.svc.SetTitle("ddns-hosts-sync")
 	t.svc.SetTooltip("后台同步未运行，请检查计划任务")
+	// S13：启动时读 config 初始化 paused（config.enabled=false 时首启菜单
+	// "暂停自动同步"勾选正确）。config 缺失/损坏（未安装）回落默认不暂停。
+	if cfg, lerr := config.Load(t.deps.ConfigPath); lerr == nil {
+		t.paused = !cfg.Enabled
+	}
 	t.rebuildMenu(t.paused)
 	t.svc.SetOnTapped(func() { t.post(t.deps.OpenConfig) })
 
@@ -172,10 +188,12 @@ func (t *Tray) rebuildMenu(paused bool) {
 	}
 }
 
-// watchClick 订阅菜单项点击并投递对应业务动作。
+// watchClick 订阅菜单项点击并投递对应业务动作（M4 修复：并入串行事件队列
+// 而非直接 dispatch——直接调用会与 pollLoop 的 refresh 并发触碰 systray 命令
+// 面/共享状态，必须经 queue 在单一 goroutine 串行执行）。
 func (t *Tray) watchClick(id string, h MenuHandle) {
 	for range h.Clicked() {
-		t.dispatch(id)
+		t.post(func() { t.dispatch(id) })
 	}
 }
 

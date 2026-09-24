@@ -29,15 +29,21 @@ const statusPollInterval = 10 * time.Second
 type Deps struct {
 	App         fyne.App
 	ConfigPath  string
-	StateDir    string // status.json / trigger.json 所在目录
+	StateDir    string // status.json 所在目录
+	TriggerPath string // trigger.json 路径（B2 落点 config\，GUI 免提权写；为空回落 StateDir）
 	LogPath     string
 	TriggerNow  func() // 尽力触发计划任务（协调者接 platform.TriggerTask；失败静默）
 	OpenLogsDir func() // 打开日志目录（资源管理器定位；协调者注入）
 }
 
 // statusPath / triggerPath 便捷拼接。
-func (d Deps) statusPath() string  { return d.StateDir + "/status.json" }
-func (d Deps) triggerPath() string { return d.StateDir + "/trigger.json" }
+func (d Deps) statusPath() string { return d.StateDir + "/status.json" }
+func (d Deps) triggerPath() string {
+	if d.TriggerPath != "" {
+		return d.TriggerPath
+	}
+	return d.StateDir + "/trigger.json" // 兼容旧调用方/测试默认
+}
 
 // GUI 配置窗口控制器。
 type GUI struct {
@@ -51,6 +57,9 @@ type GUI struct {
 	activeRow int
 
 	table *widget.Table
+
+	// tableWrap 表格的双击包装（fyne Table 无双击事件，M3 在此层补）。
+	tableWrap *entryTable
 
 	// 全局设置表单控件。
 	gInterval *widget.Entry
@@ -141,8 +150,8 @@ func (g *GUI) buildContent() fyne.CanvasObject {
 	g.banner = widget.NewRichText()
 	g.banner.Truncation = fyne.TextTruncateEllipsis
 	statusBar := container.NewHBox(
-		wrapStatus(g.statusField(stSyncTime, "最近同步: --")),
-		wrapStatus(g.statusField(stNextTime, "下次同步: --")),
+		wrapStatus(g.statusField(barSyncTime, "最近同步: --")),
+		wrapStatus(g.statusField(barNextTime, "下次同步: --")),
 		g.banner,
 	)
 	return container.NewBorder(top, statusBar, nil, nil, center)
@@ -209,15 +218,20 @@ func (g *GUI) saveConfig() error {
 // ---------------------------------------------------------------------------
 
 // StartPolling 启动 10s 状态轮询（生产由协调者在窗口 Show 后调用）：
-// 读 status.json + 状态面板 + 日志尾部 + 立即同步反馈。
+// 读 status.json + 状态面板 + 日志尾部 + 立即同步反馈。另起一路独立定时器
+// 评估"立即同步无响应"（S9：不依赖 status 文件变化）。
 func (g *GUI) StartPolling() {
 	go func() {
 		tick := time.NewTicker(statusPollInterval)
 		defer tick.Stop()
+		fbTick := time.NewTicker(syncFeedbackInterval)
+		defer fbTick.Stop()
 		for {
 			select {
 			case <-tick.C:
 				g.pollOnce()
+			case <-fbTick.C:
+				g.checkSyncFeedback()
 			case <-g.stopPoll:
 				return
 			}

@@ -37,9 +37,11 @@ func (p *unixGenericPlatform) FlushDNSCache() error {
 	return errors.New("platform: 当前平台不支持 DNS 缓存刷新")
 }
 
+// SetupAllDirs 创建数据目录树（S14 修正：需建 dataDir 本身与 config/state/
+// logs 子目录，此前实现误用 filepath.Dir(config) 导致形状不一致）。
 func (p *unixGenericPlatform) SetupAllDirs() error {
-	for _, d := range []string{p.paths.dataDir, p.paths.config, p.paths.state} {
-		if err := os.MkdirAll(filepath.Dir(d), 0o755); err != nil {
+	for _, d := range dataDirTree(p.paths.dataDir, p.paths.state) {
+		if err := os.MkdirAll(d, 0o755); err != nil {
 			return err
 		}
 	}

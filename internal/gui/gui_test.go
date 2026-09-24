@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"fyne.io/fyne/v2/test"
+	"fyne.io/fyne/v2/widget"
 
 	"github.com/heliopause/ddns-hosts-sync/internal/config"
 	"github.com/heliopause/ddns-hosts-sync/internal/model"
@@ -43,8 +44,8 @@ func TestGUITableBinding(t *testing.T) {
 		t.Fatal("窗口未创建")
 	}
 	rows, cols := g.tableLength()
-	if rows != 3 { // 表头 + 2 条目
-		t.Fatalf("表格行数 = %d, want 3", rows)
+	if rows != 2 { // 数据行数 = 条目数（表头由 fyne ShowHeaderRow 叠绘，不计入 Length）
+		t.Fatalf("表格行数 = %d, want 2", rows)
 	}
 	if cols != numCols {
 		t.Fatalf("表格列数 = %d, want %d", cols, numCols)
@@ -63,6 +64,86 @@ func TestGUITableBinding(t *testing.T) {
 	// 表头。
 	if got := g.headerTitle(colStatus); got != "状态" {
 		t.Fatalf("表头 = %q", got)
+	}
+}
+
+// TestGUITableSelectionDrivesToolbar（M3-1）表格选中 → activeRow 追踪；
+// 工具栏"启用/停用/上移/下移"以所选行为锚点生效。
+func TestGUITableSelectionDrivesToolbar(t *testing.T) {
+	g, dir := newTestGUI(t)
+	cfgPath := filepath.Join(dir, "config.yaml")
+
+	// 选中第二行（数据行 1 = e-02，Enabled=false）。
+	g.table.Select(widget.TableCellID{Row: 1, Col: colSource})
+	if g.activeRow != 1 {
+		t.Fatalf("Select 后 activeRow = %d, want 1", g.activeRow)
+	}
+	// 启用/停用联动：e-02 翻转 Enabled=false → true 并落盘。
+	g.onToggleEnabled()
+	reloaded, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reloaded.Entries[1].Enabled {
+		t.Error("工具栏启用/停用应作用于选中行（e-02）并落盘")
+	}
+
+	// 选中首行 → 上移越界 no-op；顺序不变。
+	g.table.Select(widget.TableCellID{Row: 0, Col: colSource})
+	if g.activeRow != 0 {
+		t.Fatalf("activeRow = %d, want 0", g.activeRow)
+	}
+	g.moveEntry(-1)
+	reloaded, _ = config.Load(cfgPath)
+	if reloaded.Entries[0].ID != "e-01" {
+		t.Error("首行上移越界应保持顺序不变")
+	}
+	// 下移：首行与次行交换并落盘。
+	g.moveEntry(1)
+	reloaded, _ = config.Load(cfgPath)
+	if reloaded.Entries[0].ID != "e-02" || reloaded.Entries[1].ID != "e-01" {
+		t.Errorf("下移应交换相邻两行: %+v", reloaded.Entries)
+	}
+}
+
+// TestGUITableDeleteResetsActiveRow（M3-2）删除后 activeRow 复位（-1），
+// 后续工具栏操作不再作用于已位移的数据行。
+func TestGUITableDeleteResetsActiveRow(t *testing.T) {
+	g, dir := newTestGUI(t)
+	cfgPath := filepath.Join(dir, "config.yaml")
+
+	g.table.Select(widget.TableCellID{Row: 1, Col: colSource})
+	if g.activeRow != 1 {
+		t.Fatalf("activeRow = %d, want 1", g.activeRow)
+	}
+	g.deleteEntryAt(g.activeRow)
+	if g.activeRow != -1 {
+		t.Fatalf("删除后 activeRow 应复位 -1，实际 %d", g.activeRow)
+	}
+	reloaded, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reloaded.Entries) != 1 {
+		t.Fatalf("删除后条目数 = %d, want 1", len(reloaded.Entries))
+	}
+	if reloaded.Entries[0].ID != "e-01" {
+		t.Errorf("应删除选中行 e-02，保留 e-01")
+	}
+	// 复位后工具栏编辑/删除为 no-op（越界安全）。
+	g.onEditEntry()
+	g.onDeleteEntry()
+	g.onToggleEnabled()
+}
+
+// TestGUITableDoubleClickOpensEditDialog（M3-3）双击表格行进入编辑对话框
+// （编辑对象为当前选中行）。
+func TestGUITableDoubleClickOpensEditDialog(t *testing.T) {
+	g, _ := newTestGUI(t)
+	g.table.Select(widget.TableCellID{Row: 0, Col: colSource}) // 先选中首行
+	test.DoubleTap(g.tableWrap)
+	if o := g.win.Canvas().Overlays().List(); len(o) == 0 {
+		t.Fatal("双击表格行应打开编辑对话框（modal overlay）")
 	}
 }
 
@@ -122,6 +203,51 @@ func TestGUIValidateEntryUnique(t *testing.T) {
 	// 大小写折叠后去重。
 	if err := validateEntryUnique(append(base, model.Entry{ID: "b", Target: "T.Example.COM", Enabled: true}), ""); err == nil {
 		t.Fatal("大小写不同应视为重复")
+	}
+}
+
+// TestGUISaveSettingsKeepsPauseState（M6 回归）批量保存全局设置不得清除
+// "暂停自动同步"：勾选暂停（enabled=false 落盘）后保存其它字段，enabled 仍
+// 为 false、勾选保持。
+func TestGUISaveSettingsKeepsPauseState(t *testing.T) {
+	g, dir := newTestGUI(t)
+	cfgPath := filepath.Join(dir, "config.yaml")
+
+	// 勾选暂停（OnChanged 即时写 config：enabled=false）。
+	g.gPause.SetChecked(true)
+	g.gPause.SetChecked(true) // 幂等：二次 SetChecked 值未变不触发写盘
+	reloaded, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.Enabled {
+		t.Fatal("前置：勾选暂停后 enabled 应为 false")
+	}
+
+	// 修改其它字段并批量保存。
+	g.gInterval.SetText("30")
+	g.onSaveSettings()
+
+	reloaded, err = config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.Enabled {
+		t.Error("保存后 enabled 应保持 false（暂停态不被批量保存清除）")
+	}
+	if reloaded.IntervalMinutes != 30 {
+		t.Errorf("其它字段应正常保存: interval=%d, want 30", reloaded.IntervalMinutes)
+	}
+	if !g.gPause.Checked {
+		t.Error("保存后暂停勾选应保持")
+	}
+
+	// 取消勾选 → 保存后 enabled=true。
+	g.gPause.SetChecked(false)
+	g.onSaveSettings()
+	reloaded, _ = config.Load(cfgPath)
+	if !reloaded.Enabled {
+		t.Error("取消暂停后保存应恢复 enabled=true")
 	}
 }
 
@@ -271,5 +397,46 @@ func TestGUIUpsertEntry(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("编辑结果未落盘")
+	}
+}
+
+// TestGUISyncNoResponseTimerClearsPending（S9）任务死亡（status 不再变化）时，
+// 独立定时器路径 checkSyncFeedback 仍能判定 3 分钟无响应：清除 pending 并
+// 走向红横幅分支——修复前该评估挂在轮询 changed==true 分支内，永不触发。
+func TestGUISyncNoResponseTimerClearsPending(t *testing.T) {
+	g, _ := newTestGUI(t)
+	g.mu.Lock()
+	g.syncReqPending = true
+	g.syncReqAt = time.Now().Add(-syncNoResponse - time.Second) // 已超 3 分钟
+	g.syncReqUpdatedAt = time.Time{}                            // 无前进
+	g.mu.Unlock()
+
+	g.checkSyncFeedback()
+
+	g.mu.Lock()
+	pending := g.syncReqPending
+	g.mu.Unlock()
+	if pending {
+		t.Fatal("超时后 pending 应被清除（独立定时器路径，不依赖文件变化）")
+	}
+}
+
+// TestGUISyncNoResponseTimerWithinDeadlineKeepsPending 未超时限时定时器评估
+// 不得清除 pending（继续等待轮询完成反馈）。
+func TestGUISyncNoResponseTimerWithinDeadlineKeepsPending(t *testing.T) {
+	g, _ := newTestGUI(t)
+	g.mu.Lock()
+	g.syncReqPending = true
+	g.syncReqAt = time.Now().Add(-time.Minute) // 未超 3 分钟
+	g.syncReqUpdatedAt = time.Time{}
+	g.mu.Unlock()
+
+	g.checkSyncFeedback()
+
+	g.mu.Lock()
+	pending := g.syncReqPending
+	g.mu.Unlock()
+	if !pending {
+		t.Fatal("未超 3 分钟时定时器评估不得清除 pending")
 	}
 }

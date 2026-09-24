@@ -91,6 +91,11 @@ const (
 	stTaskHealth = "task_health"
 	stHostsBlock = "hosts_block"
 	stEntriesSum = "entries_summary"
+
+	// 底部状态栏字段键（M7：与状态 Tab 的 stSyncTime/stNextTime 拆分独立，
+	// 此前共用 map key 导致后注册的 Tab 覆盖状态栏实例，底部恒为 "--"）。
+	barSyncTime = "bar_sync_time"
+	barNextTime = "bar_next_time"
 )
 
 // buildStatusPanel 状态 Tab：只读 Labels + 日志视图（DSD §4.1）。
@@ -181,10 +186,21 @@ func (g *GUI) refreshStatusPanel() {
 	g.refreshLogs(false)
 }
 
-// updateStatusBarSummary 更新窗口底部"最近同步/下次"摘要。
+// updateStatusBarSummary 更新窗口底部"最近同步/下次同步"摘要（M7：独立
+// barSyncTime/barNextTime 实例，与状态 Tab 面板字段互不覆盖）。
 func (g *GUI) updateStatusBarSummary(st *model.SyncStatus) {
-	// 底部状态栏字段暂由面板承担；预留（避免不必要引用）。
-	_ = st
+	barTime := g.stLabels[barSyncTime]
+	barNext := g.stLabels[barNextTime]
+	if barTime == nil || barNext == nil {
+		return
+	}
+	if st == nil {
+		barTime.SetText("最近同步: --")
+		barNext.SetText("下次同步: --")
+		return
+	}
+	barTime.SetText("最近同步: " + timeFmt(st.UpdatedAt))
+	barNext.SetText("下次同步: " + timeFmt(st.NextScheduledAt))
 }
 
 // timeFmt 本地时区展示（nil/零值 → "--"）。

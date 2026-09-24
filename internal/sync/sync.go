@@ -29,10 +29,15 @@ import (
 // Options Run 的入参（DSD §2.3）。
 type Options struct {
 	ConfigPath string
-	StateDir   string // status.json / trigger.json 所在目录
-	LogPath    string
-	HostsPath  string
-	Force      bool // 忽略间隔门，立即完整同步（trigger sync_now 置 true）
+	StateDir   string // status.json / sync.lock 所在目录
+	// TriggerPath trigger.json 路径（B2：落点自 state\ 迁移至 config\，
+	// config\ 已 Users M 可写，GUI 免提权写触发文件）。为空时回落
+	// StateDir/trigger.json（兼容旧调用方/测试），调用方应显式传入
+	// platform.TriggerPath()。
+	TriggerPath string
+	LogPath     string
+	HostsPath   string
+	Force       bool // 忽略间隔门，立即完整同步（trigger sync_now 置 true）
 	// IntervalTick 任务注册粒度（固定 60s）。间隔门判据为 lastRunAt+interval，
 	// M1 不直接用该值，保留字段供 M2 调度语义使用。
 	IntervalTick int
@@ -96,7 +101,11 @@ func Run(opts Options) (final *model.SyncStatus, err error) {
 
 	// ── 1. 初始化：定位状态/触发文件，状态目录必须可用（唯一致命项）。──
 	statusPath := filepath.Join(opts.StateDir, "status.json")
-	triggerPath := filepath.Join(opts.StateDir, "trigger.json")
+	triggerPath := opts.TriggerPath
+	if triggerPath == "" {
+		// 兼容旧调用方（B2 前 trigger 位于 state 目录；此处兜底避免行为回退）。
+		triggerPath = filepath.Join(opts.StateDir, "trigger.json")
+	}
 	if mkerr := os.MkdirAll(opts.StateDir, 0o755); mkerr != nil {
 		return nil, fmt.Errorf("状态目录不可用（%s）: %w", opts.StateDir, mkerr)
 	}

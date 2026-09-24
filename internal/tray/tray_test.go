@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -287,4 +288,217 @@ func TestNewSyncNowTriggerShape(t *testing.T) {
 	if !strings.HasPrefix(tg.RequestID, "tray-") {
 		t.Fatalf("request_id 前缀异常: %q", tg.RequestID)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// M4/M5/S13：串行队列回归、启动目录保障、暂停态初始化
+// ---------------------------------------------------------------------------
+
+// runnableFakeSvc 模拟完整 systray 循环：Run 触发 onReady 后阻塞于外部，
+// Quit 触发 onExit（close(t.done)，tr.Run 返回），供 Run 生命周期集成测试。
+type runnableFakeSvc struct {
+	fakeSvc
+	onExit func()
+}
+
+func (f *runnableFakeSvc) Run(onReady, onExit func()) {
+	f.onExit = onExit
+	onReady()
+}
+
+func (f *runnableFakeSvc) Quit() {
+	if f.onExit != nil {
+		f.onExit()
+	}
+}
+
+// TestTrayMenuClickSerializedWithPoll（M4 -race 回归）：菜单点击与轮询刷新
+// 并发投递，全部经串行事件队列执行。旧实现直接 dispatch 会在 watchClick
+// goroutine 中并发触碰 systray 命令面/共享状态，-race 可捕捉；修复后确定性
+// 断言点击回调恰好执行一次。
+func TestTrayMenuClickSerializedWithPoll(t *testing.T) {
+	dir := t.TempDir()
+	cfgDir := filepath.Join(dir, "config")
+	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := filepath.Join(cfgDir, "config.yaml")
+	cfg := config.Default()
+	if err := cfg.Save(cfgPath); err != nil {
+		t.Fatal(err)
+	}
+	writeStatus(t, filepath.Join(cfgDir, "status.json"), baseStatus(time.Now().UTC()))
+
+	opened := make(chan struct{}, 8)
+	tr := New(Deps{
+		LockPath:    filepath.Join(cfgDir, "tray.lock"),
+		ConfigPath:  cfgPath,
+		StatusPath:  filepath.Join(cfgDir, "status.json"),
+		TriggerPath: filepath.Join(cfgDir, "trigger.json"),
+		OpenConfig:  func() { opened <- struct{}{} },
+		OpenLogsDir: func() {},
+		TriggerTask: func() {},
+		OnQuit:      func() {},
+	})
+	runable := &runnableFakeSvc{}
+	tr.svc = runable // 替换命令面：Run 可退出、Quit 触发 onExit
+
+	runDone := make(chan error, 1)
+	go func() { runDone <- tr.Run() }()
+
+	// 就绪等待：队列消费到 sentinel 即 onReady（菜单注册）已完成。
+	ready := make(chan struct{})
+	tr.post(func() { close(ready) })
+	<-ready
+
+	h := tr.items[MenuOpenConfig].(*fakeMenuItem)
+
+	// 并发：轮询刷新大量投递 + 菜单点击。
+	var wg sync.WaitGroup
+	for i := 0; i < 50; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			tr.post(tr.refresh)
+		}()
+	}
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			h.clicked <- struct{}{}
+		}()
+	}
+	wg.Wait()
+
+	// 队列排空后断言：8 次点击恰好触发 8 次 OpenConfig（串行、无丢事件）。
+	deadline := time.Now().Add(5 * time.Second)
+	for len(opened) != 8 {
+		if time.Now().After(deadline) {
+			t.Fatalf("OpenConfig 回调次数 = %d, want 8", len(opened))
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	tr.Quit()
+	select {
+	case err := <-runDone:
+		if err != nil {
+			t.Fatalf("Run 返回错误: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Quit 后 Run 未返回")
+	}
+}
+
+// TestTrayRunCreatesLockDir（M5）config 目录缺失（未安装）时 Run 启动自动
+// MkdirAll 锁目录——锁创建顺延成功后正常常驻，不因目录缺失而退出。
+func TestTrayRunCreatesLockDir(t *testing.T) {
+	dir := t.TempDir()
+	cfgDir := filepath.Join(dir, "config") // 不存在
+	lockPath := filepath.Join(cfgDir, "tray.lock")
+	tr := New(Deps{
+		LockPath:   lockPath,
+		ConfigPath: filepath.Join(cfgDir, "config.yaml"),
+		OnQuit:     func() {},
+	})
+	runable := &runnableFakeSvc{}
+	tr.svc = runable
+
+	runDone := make(chan error, 1)
+	go func() { runDone <- tr.Run() }()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(lockPath); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("Run 应对缺失的锁目录 MkdirAll 并成功创建锁文件")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	tr.Quit()
+	select {
+	case err := <-runDone:
+		if err != nil {
+			t.Fatalf("Run 返回错误: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Quit 后 Run 未返回")
+	}
+}
+
+// TestTrayRunLockDirUncreatableContinues（M5）锁目录不可建（父路径为文件）时：
+// MkdirAll 失败仅记日志继续，随后锁获取自然失败返回错误——不 panic、不静默
+// 阻塞，行为符合"失败仅日志并继续"的降级语义。
+func TestTrayRunLockDirUncreatableContinues(t *testing.T) {
+	dir := t.TempDir()
+	blocker := filepath.Join(dir, "config")
+	if err := os.WriteFile(blocker, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tr := New(Deps{
+		LockPath:   filepath.Join(blocker, "tray.lock"),
+		ConfigPath: filepath.Join(blocker, "config.yaml"),
+		OnQuit:     func() {},
+	})
+	tr.svc = &runnableFakeSvc{}
+
+	err := tr.Run()
+	if err == nil {
+		t.Fatal("锁目录不可建时应返回锁创建错误（继续执行后的自然失败）")
+	}
+	if !strings.Contains(err.Error(), "创建单实例锁") {
+		t.Fatalf("错误应指向锁创建失败，实际: %v", err)
+	}
+}
+
+// TestTrayStartupReadsPausedFromConfig（S13）config.enabled=false 时首启菜单
+// "暂停自动同步"勾选正确；enabled=true（含 config 缺失）不勾选。
+func TestTrayStartupReadsPausedFromConfig(t *testing.T) {
+	t.Run("enabled=false 首启勾选暂停", func(t *testing.T) {
+		dir := t.TempDir()
+		cfgPath := filepath.Join(dir, "config.yaml")
+		cfg := config.Default()
+		cfg.Enabled = false
+		if err := cfg.Save(cfgPath); err != nil {
+			t.Fatal(err)
+		}
+		tr, _ := newFakeTray(t, dir, Deps{ConfigPath: cfgPath})
+		tr.onReady()
+		if !tr.paused {
+			t.Fatal("Tray.paused 应由 config.enabled=false 初始化为 true")
+		}
+		h := tr.items[MenuPauseToggle].(*fakeMenuItem)
+		if !h.checked {
+			t.Fatal("enabled=false 时菜单暂停项应勾选")
+		}
+	})
+
+	t.Run("enabled=true 不勾选", func(t *testing.T) {
+		dir := t.TempDir()
+		cfgPath := filepath.Join(dir, "config.yaml")
+		cfg := config.Default() // Enabled=true
+		if err := cfg.Save(cfgPath); err != nil {
+			t.Fatal(err)
+		}
+		tr, _ := newFakeTray(t, dir, Deps{ConfigPath: cfgPath})
+		tr.onReady()
+		if tr.paused {
+			t.Fatal("enabled=true 时 paused 应为 false")
+		}
+		if h := tr.items[MenuPauseToggle].(*fakeMenuItem); h.checked {
+			t.Fatal("enabled=true 时菜单暂停项不应勾选")
+		}
+	})
+
+	t.Run("config 缺失回落不暂停", func(t *testing.T) {
+		dir := t.TempDir()
+		tr, _ := newFakeTray(t, dir, Deps{ConfigPath: filepath.Join(dir, "no-config.yaml")})
+		tr.onReady() // 未安装：不 panic、默认不暂停
+		if tr.paused {
+			t.Fatal("config 缺失时 paused 应为 false（回落默认）")
+		}
+	})
 }

@@ -65,6 +65,7 @@ func runTray(args []string) int {
 		App:         fa,
 		ConfigPath:  p.ConfigPath(),
 		StateDir:    p.StateDir(),
+		TriggerPath: p.TriggerPath(),
 		LogPath:     p.LogPath(),
 		TriggerNow:  func() { p.TriggerTask(platform.TaskName) }, // 尽力触发，失败静默（DSD §4.5）
 		OpenLogsDir: openLogsDir,
@@ -86,7 +87,7 @@ func runTray(args []string) int {
 		LockPath:    trayLockPath(p),
 		ConfigPath:  p.ConfigPath(),
 		StatusPath:  filepath.Join(p.StateDir(), "status.json"),
-		TriggerPath: filepath.Join(p.StateDir(), "trigger.json"),
+		TriggerPath: p.TriggerPath(), // B2：config\ 下 trigger.json（Users M 可写）
 		OpenConfig: func() {
 			fyne.Do(func() { g.ShowOrFocus() })
 		},

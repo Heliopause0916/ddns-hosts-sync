@@ -17,7 +17,8 @@ func runSync(args []string) int {
 	fs.SetOutput(os.Stderr)
 	configPath := fs.String("config", "./config.yaml", "配置文件路径")
 	hostsPath := fs.String("hosts", "/etc/hosts", "hosts 文件路径（开发期显式传入临时文件，生产由 install 经 platform 路径注入）")
-	stateDir := fs.String("state", "./state", "状态目录（status.json/trigger.json）")
+	stateDir := fs.String("state", "./state", "状态目录（status.json/sync.lock）")
+	triggerPath := fs.String("trigger", "", "trigger.json 路径（B2：随 config 目录；为空回落 state 目录下）")
 	logPath := fs.String("log", "./logs/sync.log", "日志文件路径")
 	force := fs.Bool("force", false, "忽略间隔门，立即完整同步")
 	if err := fs.Parse(args); err != nil {
@@ -33,6 +34,7 @@ func runSync(args []string) int {
 	_, err := sync.Run(sync.Options{
 		ConfigPath:   *configPath,
 		StateDir:     *stateDir,
+		TriggerPath:  *triggerPath,
 		LogPath:      *logPath,
 		HostsPath:    *hostsPath,
 		Force:        *force,

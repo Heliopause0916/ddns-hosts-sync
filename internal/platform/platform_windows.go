@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 )
 
@@ -43,42 +42,31 @@ func (p *windowsPlatform) FlushDNSCache() error {
 //
 //  1. 根 %ProgramData%\ddns-hosts-sync：SYSTEM F / Administrators F /
 //     Users R+列目录（现有目录用 /T 递归收口）；
-//  2. config\：追加 Users:(OI)(CI)M（GUI 免提权写配置）；
+//  2. config\：追加 Users:(OI)(CI)M（GUI 免提权写配置与 trigger.json，B2）；
 //  3. state\、logs\：重新断言 SYSTEM F / Administrators F / Users R
 //     （子目录收口，覆盖父目录 config 继承下来的 M）。
 //
-// icacls 目标名用内置 SID 文本（*S-1-5-18 SYSTEM、*S-1-5-32-544
-// Administrators、*S-1-5-32-545 Users），避免本地化系统组名差异。
+// ACL 规则由 windowsACLRules 纯函数装配（B1：逐参传 argv，杜绝整串
+// 加引号导致的 Invalid parameter(s)）。
 func (p *windowsPlatform) SetupAllDirs() error {
-	dirs := []string{p.paths.dataDir, filepath.Join(p.paths.dataDir, "config"),
-		p.paths.state, filepath.Join(p.paths.dataDir, "logs")}
+	dirs := dataDirTree(p.paths.dataDir, p.paths.state)
 	for _, d := range dirs {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			return fmt.Errorf("platform: 创建目录 %s 失败: %w", d, err)
 		}
 	}
-	perms := []icaclsRule{
-		{dir: p.paths.dataDir, args: `/inheritance:r /grant:r *S-1-5-18:(OI)(CI)F /grant:r *S-1-5-32-544:(OI)(CI)F /grant:r *S-1-5-32-545:(OI)(CI)R /T`},
-		{dir: filepath.Join(p.paths.dataDir, "config"), args: `/grant:r *S-1-5-32-545:(OI)(CI)M /T`},
-		{dir: p.paths.state, args: `/inheritance:r /grant:r *S-1-5-18:(OI)(CI)F /grant:r *S-1-5-32-544:(OI)(CI)F /grant:r *S-1-5-32-545:(OI)(CI)R /T`},
-		{dir: filepath.Join(p.paths.dataDir, "logs"), args: `/inheritance:r /grant:r *S-1-5-18:(OI)(CI)F /grant:r *S-1-5-32-544:(OI)(CI)F /grant:r *S-1-5-32-545:(OI)(CI)R /T`},
-	}
-	for _, r := range perms {
-		if err := runIcacls(r.dir, r.args); err != nil {
+	for _, r := range windowsACLRules(p.paths.dataDir) {
+		if err := runIcacls(r.dir, r.args...); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-type icaclsRule struct {
-	dir  string
-	args string
-}
-
-// runIcacls 执行一次 icacls <dir> <args>；失败返回带输出的错误上下文。
-func runIcacls(dir, args string) error {
-	out, err := exec.Command("icacls", dir, args).CombinedOutput()
+// runIcacls 执行一次 icacls <dir> <args...>；args 逐段传参（B1），
+// 失败返回带输出的错误上下文。
+func runIcacls(dir string, args ...string) error {
+	out, err := exec.Command("icacls", append([]string{dir}, args...)...).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("platform: icacls %s 失败: %v（输出: %s）", dir, err, out)
 	}

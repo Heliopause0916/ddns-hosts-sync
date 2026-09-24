@@ -51,9 +51,7 @@ func (p *linuxPlatform) FlushDNSCache() error {
 // SetupAllDirs 创建数据目录树（XDG 用户目录，0755；无需 ACL 特殊处理——
 // Linux 平台上单用户部署，目录天然归属当前用户）。
 func (p *linuxPlatform) SetupAllDirs() error {
-	dirs := []string{p.paths.dataDir, filepath.Join(p.paths.dataDir, "config"),
-		p.paths.state, filepath.Join(p.paths.dataDir, "logs")}
-	for _, d := range dirs {
+	for _, d := range dataDirTree(p.paths.dataDir, p.paths.state) {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			return fmt.Errorf("platform: 创建目录 %s 失败: %w", d, err)
 		}
@@ -77,7 +75,7 @@ func (p *linuxPlatform) InstallTrayAutostart() error {
 		"Type=Application\n" +
 		"Name=ddns-hosts-sync\n" +
 		"Comment=ddns-hosts-sync 托盘\n" +
-		"Exec=" + p.exec + " tray\n" +
+		desktopExecLine(p.exec) + "\n" + // Exec 路径加引号（S15：含空格安装路径可用）
 		"Terminal=false\n" +
 		"X-GNOME-Autostart-enabled=true\n"
 	path := filepath.Join(dir, "ddns-hosts-sync.desktop")

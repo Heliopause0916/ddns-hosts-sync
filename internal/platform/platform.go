@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/heliopause/ddns-hosts-sync/internal/tasks"
@@ -21,8 +22,9 @@ const TaskName = "ddns-hosts-sync"
 type Platform interface {
 	// ── 路径 ──
 	HostsPath() string
-	DataDir() string    // %ProgramData%\ddns-hosts-sync / /usr/local/var/ddns-hosts-sync / XDG
-	ConfigPath() string // DataDir/config/config.yaml
+	DataDir() string     // %ProgramData%\ddns-hosts-sync / /usr/local/var/ddns-hosts-sync / XDG
+	ConfigPath() string  // DataDir/config/config.yaml
+	TriggerPath() string // DataDir/config/trigger.json（B2：自 state\ 迁至 config\，GUI 免提权写）
 	StateDir() string
 	LogPath() string
 	// ── 系统动作 ──
@@ -46,6 +48,7 @@ type pathSet struct {
 	hosts   string
 	dataDir string
 	config  string
+	trigger string // DataDir/config/trigger.json（B2 落点）
 	state   string
 	log     string
 }
@@ -66,7 +69,13 @@ func (m *machine) DataDir() string { return m.paths.dataDir }
 // ConfigPath 返回 config.yaml 路径。
 func (m *machine) ConfigPath() string { return m.paths.config }
 
-// StateDir 返回 status.json/trigger.json 目录。
+// TriggerPath 返回 trigger.json 路径（DataDir/config/trigger.json，B2）：
+// config\ 目录 DSD §5.1 已给 Users M（GUI 免提权写配置），触发文件随 config
+// 同目录可写；不再放置 state\（state\ 对 Users 只读，写 trigger 必 Access
+// Denied——审查 B2）。
+func (m *machine) TriggerPath() string { return m.paths.trigger }
+
+// StateDir 返回 status.json 所在目录。
 func (m *machine) StateDir() string { return m.paths.state }
 
 // LogPath 返回 sync.log 路径。
@@ -83,6 +92,7 @@ func (m *machine) rebase(dir string) {
 	}
 	m.paths.dataDir = dir
 	m.paths.config = filepath.Join(dir, "config", "config.yaml")
+	m.paths.trigger = filepath.Join(dir, "config", "trigger.json")
 	m.paths.state = filepath.Join(dir, "state")
 	m.paths.log = filepath.Join(dir, "logs", "sync.log")
 }
@@ -153,6 +163,7 @@ func resolveWindowsPaths(env map[string]string) pathSet {
 		hosts:   sysRoot + `\System32\drivers\etc\hosts`,
 		dataDir: data,
 		config:  data + `\config\config.yaml`,
+		trigger: data + `\config\trigger.json`,
 		state:   data + `\state`,
 		log:     data + `\logs\sync.log`,
 	}
@@ -167,6 +178,7 @@ func resolveDarwinPaths(env map[string]string) pathSet {
 		hosts:   `/etc/hosts`,
 		dataDir: data,
 		config:  filepath.Join(data, "config", "config.yaml"),
+		trigger: filepath.Join(data, "config", "trigger.json"),
 		state:   filepath.Join(data, "state"),
 		log:     filepath.Join(data, "logs", "sync.log"),
 	}
@@ -185,6 +197,7 @@ func resolveLinuxPaths(env map[string]string) pathSet {
 		hosts:   `/etc/hosts`,
 		dataDir: data,
 		config:  filepath.Join(data, "config", "config.yaml"),
+		trigger: filepath.Join(data, "config", "trigger.json"),
 		state:   filepath.Join(data, "state"),
 		log:     filepath.Join(data, "logs", "sync.log"),
 	}
@@ -199,4 +212,21 @@ func envMap() map[string]string {
 		}
 	}
 	return m
+}
+
+// ---------------------------------------------------------------------------
+// 安装目录树 / 桌面自启 Exec（纯函数，任意平台可单测）
+// ---------------------------------------------------------------------------
+
+// dataDirTree DataDir 下的安装目录集合（根 + config/state/logs 子目录）。
+// 三平台 SetupAllDirs 共用（S14：unsupported 实现此前漏建 dataDir 本身与
+// logs 子目录，统一由本函数保证形状一致）。
+func dataDirTree(dataDir, stateDir string) []string {
+	return []string{dataDir, filepath.Join(dataDir, "config"), stateDir, filepath.Join(dataDir, "logs")}
+}
+
+// desktopExecLine 组装 Linux/其它桌面自启文件的 Exec 行：可执行路径加引号
+// （安装目录含空格时 Exec= 解析不被截断，S15），后随固定参数 "tray"。
+func desktopExecLine(execPath string) string {
+	return "Exec=" + strconv.Quote(execPath) + " tray"
 }

@@ -78,6 +78,7 @@ func runInstall(args []string) int {
 	st, err := sync.Run(sync.Options{
 		ConfigPath:   p.ConfigPath(),
 		StateDir:     p.StateDir(),
+		TriggerPath:  p.TriggerPath(),
 		LogPath:      p.LogPath(),
 		HostsPath:    p.HostsPath(),
 		Force:        true,

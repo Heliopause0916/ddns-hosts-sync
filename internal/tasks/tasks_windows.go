@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-	"unicode/utf16"
 )
 
 // windowsManager schtasks 命令封装（ARCHITECTURE §5.1、DSD §5.2）。
@@ -91,34 +90,4 @@ func (m windowsManager) Exists(name string) (bool, error) {
 		return false, nil
 	}
 	return false, fmt.Errorf("schtasks /Query 失败: %v（输出: %s）", err, strings.TrimSpace(string(out)))
-}
-
-// isTaskNotFound 从 schtasks 退出码/输出识别"任务不存在"：ERROR_FILE_NOT_FOUND
-// (0x80070002 或 2)、ERROR_FILE_NOT_FOUND 文本、中文"找不到"。
-func isTaskNotFound(out []byte, err error) bool {
-	if ee, ok := err.(*exec.ExitError); ok {
-		if code := ee.ExitCode(); code == 2 {
-			return true
-		}
-	}
-	low := strings.ToLower(string(out))
-	for _, marker := range []string{"0x80070002", "does not exist", "not found", "找不到", "沒有可用的"} {
-		if strings.Contains(low, strings.ToLower(marker)) {
-			return true
-		}
-	}
-	return false
-}
-
-// utf16EncodeLE 将 UTF-8 字节按 UTF-16LE 编码（调用方保证 doc 为合法 UTF-8；
-// 非法 rune 以 U+FFFD 兜底）。BOM 拼接由 schtasksPayload 完成。
-func utf16EncodeLE(b []byte) []byte {
-	runes := []rune(string(b))
-	units := utf16.Encode(runes)
-	out := make([]byte, 0, len(units)*2+2)
-	out = append(out, 0xFF, 0xFE) // UTF-16LE BOM
-	for _, u := range units {
-		out = append(out, byte(u&0xFF), byte(u>>8))
-	}
-	return out
 }

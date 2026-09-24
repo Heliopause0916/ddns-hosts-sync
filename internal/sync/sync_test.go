@@ -339,7 +339,6 @@ func TestRun_TriggerSyncNowForcesFullSync(t *testing.T) {
 		t.Error("trigger 应被消费移除")
 	}
 }
-
 func TestRun_StaleTriggerIgnored(t *testing.T) {
 	e := setupEnv(t)
 	e.writeConfig(t, []model.Entry{e1})
@@ -367,6 +366,47 @@ func TestRun_StaleTriggerIgnored(t *testing.T) {
 	}
 	if _, err := os.Stat(triggerPath); !os.IsNotExist(err) {
 		t.Error("过期 trigger 应被消费移除")
+	}
+}
+
+// TestRun_TriggerPathInConfigDir（B2）trigger 落点迁移：Options.TriggerPath
+// 指向 config 目录时，触发由该路径消费，归档文件名语义（
+// trigger.consumed.<requestID>.json）保留在 config 目录下。
+func TestRun_TriggerPathInConfigDir(t *testing.T) {
+	e := setupEnv(t)
+	e.writeConfig(t, []model.Entry{e1})
+	configDir := filepath.Join(e.dir, "config")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatalf("建 config 目录失败: %v", err)
+	}
+	triggerPath := filepath.Join(configDir, "trigger.json")
+	e.opts.TriggerPath = triggerPath
+	f := &fakeResolver{bySource: map[string][]string{"ok-a.example.com": {"192.0.2.10"}}}
+	e.attach(f)
+	if _, err := sync.Run(e.opts); err != nil {
+		t.Fatalf("首轮 Run 失败: %v", err)
+	}
+
+	// 在 config 目录写新鲜 trigger（模拟 GUI 新落点）。
+	tr := &model.Trigger{Version: 1, RequestID: "req-b2", RequestedAt: time.Now().UTC(), Action: model.ActionSyncNow}
+	if err := state.WriteTrigger(triggerPath, tr); err != nil {
+		t.Fatalf("写 config 下 trigger 失败: %v", err)
+	}
+	e.opts.Force = false
+	st, err := sync.Run(e.opts)
+	if err != nil {
+		t.Fatalf("trigger 轮 Run 失败: %v", err)
+	}
+	if st.SyncWindow != model.WindowSynced {
+		t.Errorf("config 下新鲜 sync_now trigger 应完整同步: %s", st.SyncWindow)
+	}
+	if _, err := os.Stat(triggerPath); !os.IsNotExist(err) {
+		t.Error("config 下 trigger 应被消费移除")
+	}
+	// 归档文件名语义保留：trigger.consumed.<requestID>.json 出现在 config 目录。
+	archived := filepath.Join(configDir, "trigger.consumed.req-b2.json")
+	if _, err := os.Stat(archived); !os.IsNotExist(err) {
+		t.Errorf("归档文件不应残留在 config 目录（消费后即删除）: %v", err)
 	}
 }
 

@@ -23,6 +23,20 @@ import (
 // 轮询仅对状态列调用 RefreshItem 单格刷新，不整表 Refresh。
 // ---------------------------------------------------------------------------
 
+// entryTable 包装 widget.Table：叠加 fyne.DoubleTappable（fyne Table 本体仅
+// 实现 Tappable）。双击 → 编辑当前选中行（fyne 双击前必先触发单击选中，
+// 故 activeRow 已指向命中行，DSD §4.2"双击行进入编辑"）。
+type entryTable struct {
+	*widget.Table
+	onDoubleTap func()
+}
+
+func (t *entryTable) DoubleTapped(_ *fyne.PointEvent) {
+	if t.onDoubleTap != nil {
+		t.onDoubleTap()
+	}
+}
+
 // buildTable 组装条目表格。
 func (g *GUI) buildTable() fyne.CanvasObject {
 	t := widget.NewTable(
@@ -44,17 +58,26 @@ func (g *GUI) buildTable() fyne.CanvasObject {
 	t.SetColumnWidth(colStatus, 180)
 	t.SetColumnWidth(colIPs, 180)
 	t.SetColumnWidth(colNote, 170)
+	// M3：追踪表格选中行（TrackedSelection），工具栏编辑/删除/上移/下移/启停
+	// 均以 activeRow 为锚点（DSD §4.2）。
+	t.OnSelected = func(id widget.TableCellID) {
+		g.setActiveRow(id.Row)
+	}
 	g.table = t
-	return t
+	w := &entryTable{Table: t, onDoubleTap: func() { g.onEditEntry() }}
+	g.tableWrap = w
+	return w
 }
 
-// tableLength 行数：表头 + entries 数。
+// tableLength 表格数据行数 = entries 条数。fyne Table 的表头行由
+// ShowHeaderRow 叠加绘制（Length 只计数据行，UpdateHeader 以 Row=-1 标记
+// 表头），不再把表头计入行数——此前 +1 导致多渲染一行空数据。
 func (g *GUI) tableLength() (int, int) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	n := 1 // 表头行
+	n := 0
 	if g.cfg != nil {
-		n += len(g.cfg.Entries)
+		n = len(g.cfg.Entries)
 	}
 	return n, numCols
 }
@@ -253,23 +276,28 @@ func (g *GUI) onDeleteEntry() {
 	dialog.ShowConfirm("删除条目",
 		"确定删除条目 "+entry.Source+" → "+entry.Target+" 吗？\nhosts 中的对应行将由下次同步清理。",
 		func(ok bool) {
-			if !ok || g.cfg == nil {
+			if !ok {
 				return
 			}
-			g.mu.Lock()
-			row := g.activeRow
-			if row < 0 || row >= len(g.cfg.Entries) {
-				g.mu.Unlock()
-				return
-			}
-			g.cfg.Entries = append(g.cfg.Entries[:row], g.cfg.Entries[row+1:]...)
-			g.mu.Unlock()
-			if err := g.saveConfig(); err != nil {
-				return
-			}
-			g.setActiveRow(-1)
-			g.tableRefresh()
+			g.deleteEntryAt(g.activeRow)
 		}, g.win)
+}
+
+// deleteEntryAt 删除指定行并即时写 config（确认对话框回调内调用，抽离以便
+// 单测）。删除后活动行复位（M3：防止 activeRow 指向已位移/越界的数据行）。
+func (g *GUI) deleteEntryAt(row int) {
+	g.mu.Lock()
+	if g.cfg == nil || row < 0 || row >= len(g.cfg.Entries) {
+		g.mu.Unlock()
+		return
+	}
+	g.cfg.Entries = append(g.cfg.Entries[:row], g.cfg.Entries[row+1:]...)
+	g.mu.Unlock()
+	if err := g.saveConfig(); err != nil {
+		return
+	}
+	g.setActiveRow(-1)
+	g.tableRefresh()
 }
 
 // moveEntry 上移/下移交换（写入 config 顺序，§4.2 排序）。
