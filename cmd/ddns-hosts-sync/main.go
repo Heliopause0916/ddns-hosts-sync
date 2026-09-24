@@ -2,7 +2,8 @@
 // （ARCHITECTURE.md §3.1，DSD §2.6 导入方向硬约束）。
 //
 // M0 实现 version 与子命令骨架；M1 实现 sync；M2b-1 实现 install/uninstall
-// （tasks/platform 三平台）；tray 留待 M2b-2。
+// （tasks/platform 三平台）；M2b-2 实现 tray/gui（fyne 集成）；M2b-3 完成 tray
+// 子命令接线（platform 路径注入 + gui 回调），M2 闭环。
 package main
 
 import (
@@ -30,9 +31,7 @@ func main() {
 	case "uninstall":
 		os.Exit(runUninstall(os.Args[2:]))
 	case "tray":
-		// M2b-2 交付；本期仅骨架。
-		fmt.Fprintln(os.Stderr, "tray: 未实现（M2b-2 交付）")
-		os.Exit(1)
+		os.Exit(runTray(os.Args[2:]))
 	default:
 		usage()
 		os.Exit(1)
@@ -46,7 +45,7 @@ func usage() {
   ddns-hosts-sync <子命令>
 
 子命令:
-  tray        托盘 UI（未实现）
+  tray        托盘 UI：常驻系统托盘、四色状态、配置窗口、立即同步（登录自启）
   sync        后台同步，用法见 ddns-hosts-sync sync -h
   install     安装：目录/ACL + 默认配置 + 计划任务 + 托盘自启 + 首轮同步
   uninstall   卸载：注销任务/自启 + hosts 还原 + 数据目录清理
